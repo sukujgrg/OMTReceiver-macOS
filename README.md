@@ -44,7 +44,7 @@ Each browser has a budget of **12 simultaneous live previews**, including receiv
 
 This is a connection/rendering budget, not a guaranteed throughput or total-memory limit: the pinned SDK still allocates some decoder resources using each source's original dimensions. Capacity depends on the Mac, source formats and network. Multiple browser windows have independent preview budgets and source/mute state. Each physical display has one fullscreen owner: activating output from another browser on that display stops the displaced video and audio.
 
-**File → New Receiver Window** opens another independent source browser/output. Each browser remembers its own output mute state. Browser windows restore their previous size and position using AppKit frame autosaving, including after closing and reopening a receiver. Fullscreen output uses a separate window and does not replace the saved browser frame. Audio uses the current macOS default output device.
+**File → New Receiver Window** opens another independent source browser/output. Each browser remembers its own output mute state. Browser windows restore their previous size and position across app launches using AppKit frame autosaving. Audio uses the current macOS default output device.
 
 **Connect to Address…** accepts the sender's actual TCP address, for example `omt://192.168.1.20:6400`, `sender.local:6500`, or `omt://[::1]:6400`, and opens it fullscreen. No fixed sender port is assumed. Discovery never selects an output for you, and a playing source remains represented if its advertisement temporarily disappears.
 

@@ -33,7 +33,6 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var audioError: String?
     private var videoError: String?
     private(set) var muted = false
-    var onWindowWillClose: ((ReceiverWindowController) -> Void)?
     var onClose: ((ReceiverWindowController) -> Void)?
     var onCheckForUpdates: ((NSWindow?) -> Void)?
     var onRevealControls: ((NSWindow?) -> Void)?
@@ -62,14 +61,12 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         shouldCascadeWindows = false
         window.delegate = self
         build()
-        let savedFrame = frameAutosaveName ?? Self.defaultFrameAutosaveName(number: number)
-        // Restore the finished AppKit frame, including its toolbar. Register
-        // autosaving afterward so initial placement cannot overwrite a saved frame.
-        if !window.setFrameUsingName(savedFrame) {
-            if number == 1 { window.center() }
-            else { window.cascadeTopLeft(from: NSPoint(x: 100 + number * 22, y: 800 - number * 22)) }
-        }
-        window.setFrameAutosaveName(savedFrame)
+        window.layoutIfNeeded()
+        if number == 1 { window.center() }
+        else { window.cascadeTopLeft(from: NSPoint(x: 100 + number * 22, y: 800 - number * 22)) }
+        // The standard controller property restores and autosaves the frame.
+        // Apply it after content, toolbar, and default placement are finished.
+        windowFrameAutosaveName = frameAutosaveName ?? Self.defaultFrameAutosaveName(number: number)
         fullscreen = FullscreenController(owner: window, home: pictureHost, video: video, keepOwnerVisible: true, screens: screens)
         fullscreen.restoreOwnerFocus = { [weak self] in self?.sourceBrowser.focusSelectedSource() }
         fullscreen.onChange = { [weak self] in self?.fullscreenChanged() }
@@ -120,7 +117,10 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
 
     private func build() {
         guard let window else { return }
-        let root = NSViewController(); root.view = NSView()
+        let root = NSViewController()
+        // AppKit resizes a window to a newly assigned controller's view. Start
+        // with the current content bounds so a zero-sized root cannot collapse it.
+        root.view = NSView(frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: window.contentLayoutRect.size))
         root.addChild(sourceBrowser)
         window.contentViewController = root
         let browser = sourceBrowser.view
@@ -308,20 +308,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func finishShutdown() {
         let completions = shutdownCompletions; shutdownCompletions.removeAll(); completions.forEach { $0() }
     }
-    func windowWillClose(_ notification: Notification) {
-        if let window, !window.frameAutosaveName.isEmpty {
-            window.saveFrame(usingName: window.frameAutosaveName)
-            // Closing does not release AppKit's name registration while this
-            // window is still retained during asynchronous receiver retirement.
-            window.setFrameAutosaveName("")
-        }
-        // The frame slot is reusable as soon as the native window closes;
-        // keep asynchronous media retirement on its separate completion path.
-        let windowWillClose = onWindowWillClose
-        onWindowWillClose = nil
-        windowWillClose?(self)
-        shutdown { [self] in onClose?(self) }
-    }
+    func windowWillClose(_ notification: Notification) { shutdown { [self] in onClose?(self) } }
     func owns(_ candidate: NSWindow?) -> Bool { candidate.map { window === $0 || fullscreen?.owns($0) == true } ?? false }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) + [.receiverUpdate] }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.receiverSidebar, .flexibleSpace, .receiverMute, .receiverReconnect, .receiverFullscreen] }
