@@ -1,7 +1,6 @@
 import AppKit
 
 private extension NSToolbarItem.Identifier {
-    static let receiverSidebar = Self("receiver.sidebar")
     static let receiverMute = Self("receiver.mute")
     static let receiverReconnect = Self("receiver.reconnect")
     static let receiverFullscreen = Self("receiver.fullscreen")
@@ -311,11 +310,10 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     func windowWillClose(_ notification: Notification) { shutdown { [self] in onClose?(self) } }
     func owns(_ candidate: NSWindow?) -> Bool { candidate.map { window === $0 || fullscreen?.owns($0) == true } ?? false }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) + [.receiverUpdate] }
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.receiverSidebar, .flexibleSpace, .receiverMute, .receiverReconnect, .receiverFullscreen] }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .receiverMute, .receiverReconnect, .receiverFullscreen] }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         let item = NSToolbarItem(itemIdentifier: identifier); item.target = self
         switch identifier {
-        case .receiverSidebar: item.label = "Sources"; item.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: "Show Sources"); item.action = #selector(toggleSidebar)
         case .receiverMute: item.label = "Mute"; item.image = NSImage(systemSymbolName: "speaker.wave.2", accessibilityDescription: "Mute Output Audio"); item.action = #selector(toggleMute)
         case .receiverReconnect: item.label = "Reconnect"; item.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Reconnect"); item.action = #selector(reconnect)
         case .receiverFullscreen: item.label = "Fullscreen"; item.image = NSImage(systemSymbolName: "arrow.up.left.and.arrow.down.right", accessibilityDescription: "Open Source Fullscreen"); item.action = #selector(toggleFullscreen)
