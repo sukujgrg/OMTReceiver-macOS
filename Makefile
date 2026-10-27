@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help build run project test test-release clean release release-check release-notarize release-publish setup-notarization
+.PHONY: help build run project test test-release test-site clean release release-check release-notarize release-publish setup-notarization
 
 NOTARY_PROFILE ?= OMTReceiverNotary
 NOTES_FILE ?=
@@ -14,8 +14,9 @@ help:
 	  'make release-check     Check source, destination, and CI only' \
 	  'make release-notarize  Produce signed local artifacts without publishing' \
 	  'make release-publish   Publish saved artifacts without building or notarizing' \
-	  'make test              Run app and offline release regression tests' \
+	  'make test              Run app, release/feed, and website regression tests' \
 	  'make test-release      Run the offline release/feed regressions only' \
+	  'make test-site         Check static website links, assets, and navigation offline' \
 	  'make project           Regenerate the checked-in Xcode project' \
 	  'make clean             Remove build caches; preserve saved releases'
 
@@ -58,7 +59,10 @@ test-release:
 	python3 scripts/test-update-feed.py
 	python3 scripts/test-release-workflow.py
 
-test: test-release
+test-site:
+	python3 scripts/test-site.py
+
+test: test-release test-site
 	xcodebuild -project OMTReceiver.xcodeproj -scheme OMTReceiver \
 		-destination 'platform=macOS,arch=arm64' -configuration Debug \
 		-derivedDataPath build/DerivedData -parallel-testing-enabled NO test \

@@ -16,13 +16,19 @@ enum OMTReceiverApplication {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let discovery = OMTDiscoveryManager()
     private let updates = AppUpdateViewModel(driver: SparkleUpdateDriver())
+    private let windowContext: @MainActor () -> (key: NSWindow?, main: NSWindow?)
     private var receivers: [ReceiverWindowController] = []
     private var settings: PreferencesWindowController?
     private var nextWindowNumber = 1
     private var terminating = false
     private var testHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil }
+    init(windowContext: @escaping @MainActor () -> (key: NSWindow?, main: NSWindow?) = { (NSApp.keyWindow, NSApp.mainWindow) }) {
+        self.windowContext = windowContext
+        super.init()
+    }
     private var activeReceiver: ReceiverWindowController? {
-        Self.receiver(keyWindow: NSApp.keyWindow, mainWindow: NSApp.mainWindow, receivers: receivers)
+        let context = windowContext()
+        return Self.receiver(keyWindow: context.key, mainWindow: context.main, receivers: receivers)
     }
     static func receiver(keyWindow: NSWindow?, mainWindow: NSWindow?, receivers: [ReceiverWindowController]) -> ReceiverWindowController? {
         // Settings and other non-receiver key windows have no implicit media
@@ -134,24 +140,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         NSWorkspace.shared.open(url)
     }
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard !terminating else { return false }
         switch menuItem.action {
-        case #selector(checkForUpdates): return !terminating && updates.canCheckForUpdates
-        case #selector(toggleFullscreen): menuItem.title = activeReceiver?.isFullscreen == true ? "Exit Fullscreen" : "Enter Fullscreen"; return activeReceiver != nil
+        case #selector(checkForUpdates): return updates.canCheckForUpdates
+        case #selector(toggleFullscreen): menuItem.title = activeReceiver?.isFullscreen == true ? "Exit Full Screen" : "Enter Full Screen"; return activeReceiver != nil
         case #selector(toggleMute): menuItem.state = activeReceiver?.muted == true ? .on : .off; return activeReceiver != nil
         case #selector(reconnect), #selector(disconnect): return activeReceiver?.selectedSource != nil
         case #selector(toggleSidebar): return activeReceiver != nil
         case #selector(closeWindow): return NSApp.keyWindow != nil
-        default: return !terminating
+        default: return true
         }
     }
-    private func makeMenus() {
+    func makeMenus() {
         let bar = NSMenu()
         NSApp.mainMenu = bar
         let app = submenu("OMTReceiver", in: bar)
         add("About OMTReceiver", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), to: app, target: NSApp)
         app.addItem(.separator())
-        add("Check for Updates…", #selector(checkForUpdates), to: app)
         add("Settings…", #selector(showSettings), key: ",", to: app)
+        add("Check for Updates…", #selector(checkForUpdates), to: app)
         app.addItem(.separator())
         let services = submenu("Services", in: app); NSApp.servicesMenu = services
         app.addItem(.separator())
@@ -163,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let file = submenu("File", in: bar)
         add("New Receiver Window", #selector(newReceiver), key: "n", to: file)
         add("Connect to Address…", #selector(connectAddress), key: "o", to: file)
+        add("Open Test Pattern", #selector(testPattern), key: "t", modifiers: [.command, .option], to: file)
         file.addItem(.separator())
         add("Close Window", #selector(closeWindow), key: "w", to: file)
         let edit = submenu("Edit", in: bar)
@@ -175,13 +183,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         add("Select All", #selector(NSText.selectAll(_:)), key: "a", to: edit, responder: true)
         let view = submenu("View", in: bar)
         add("Show Sources", #selector(toggleSidebar), key: "s", modifiers: [.command, .option], to: view)
-        add("Enter Fullscreen", #selector(toggleFullscreen), key: "f", modifiers: [.command, .control], to: view)
         view.addItem(.separator())
-        add("Mute Audio", #selector(toggleMute), key: "m", modifiers: [.command, .shift], to: view)
-        add("Reconnect", #selector(reconnect), key: "r", to: view)
-        add("Disconnect", #selector(disconnect), key: "d", modifiers: [.command, .shift], to: view)
-        view.addItem(.separator())
-        add("Test Pattern", #selector(testPattern), key: "t", modifiers: [.command, .option], to: view)
+        add("Enter Full Screen", #selector(toggleFullscreen), key: "f", modifiers: [.command, .control], to: view)
+        let playback = submenu("Playback", in: bar)
+        add("Mute Audio", #selector(toggleMute), key: "m", modifiers: [.command, .shift], to: playback)
+        playback.addItem(.separator())
+        add("Reconnect", #selector(reconnect), key: "r", to: playback)
+        add("Stop Output", #selector(disconnect), key: "d", modifiers: [.command, .shift], to: playback)
         let window = submenu("Window", in: bar); NSApp.windowsMenu = window
         add("Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m", to: window, responder: true)
         add("Zoom", #selector(NSWindow.performZoom(_:)), to: window, responder: true)

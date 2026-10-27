@@ -4,6 +4,8 @@
 
 A standalone **AppKit macOS application** for receiving Open Media Transport video and audio. This is a complete Xcode application project, with independent receiver windows, native source lists, menus, Settings, display-aware fullscreen, Metal video and Core Audio playback. The application UI uses AppKit throughout; eucaly is used only as a testing reference and optional sender.
 
+[Website and download](https://sukujgrg.github.io/OMTReceiver-macOS/) · [Latest signed, notarized release](https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest)
+
 ## Build and run
 
 Requires **Apple Silicon, macOS 14 or later, and Xcode 16 or later**. The bundled OMT transport is arm64. The project targets the same signing team as eucaly, and pins **Sparkle 2.9.6** through Xcode Swift Package Manager.
@@ -16,7 +18,7 @@ The Make workflow matches eucaly:
 make build             # signed Release archive/export into ~/Applications/OMTReceiver.app
 make run               # build and open that installed app
 make setup-notarization # securely store a fresh OMTReceiver-only app-specific password
-make test              # native app tests + offline release/feed regressions
+make test              # native app tests + offline release/feed and website regressions
 make release-check     # verify clean source, GitHub destination and exact-commit CI
 make release-notarize  # prepare signed/notarized artifacts without publishing
 make release-publish   # publish verified saved artifacts
@@ -46,11 +48,11 @@ This is a connection/rendering budget, not a guaranteed throughput or total-memo
 
 **Connect to Address…** accepts the sender's actual TCP address, for example `omt://192.168.1.20:6400`, `sender.local:6500`, or `omt://[::1]:6400`, and opens it fullscreen. No fixed sender port is assumed. Discovery never selects an output for you, and a playing source remains represented if its advertisement temporarily disappears.
 
-The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. **Reconnect** creates a fresh full-quality receiver; **Disconnect** stops that output. The silent browser previews remain independent. Video and audio freshness are tracked separately, so continuing audio cannot conceal frozen video (or the reverse).
+The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. **Playback → Reconnect** creates a fresh full-quality receiver; **Playback → Stop Output** stops that output. The silent browser previews remain independent. Video and audio freshness are tracked separately, so continuing audio cannot conceal frozen video (or the reverse).
 
 ## Fullscreen and displays
 
-Click a live source thumbnail, use the toolbar button, or choose **View → Enter Fullscreen**. A full-quality video surface is presented in an AppKit borderless window covering the chosen `NSScreen`, independently of the thumbnail surfaces. Escape closes output and keeps the browser window and geometry intact.
+Click a live source thumbnail, use the toolbar button, or choose **View → Enter Full Screen**. A full-quality video surface is presented in an AppKit borderless window covering the chosen `NSScreen`, independently of the thumbnail surfaces. Escape closes output and keeps the browser window and geometry intact.
 
 **Settings → Fullscreen display** defaults to the system's main display. A chosen display is saved by its persistent Core Graphics UUID, rather than its transient numeric display ID. The list updates when displays change, and changing the preference moves an active fullscreen view immediately. If the target is absent when entering fullscreen, the main display is used. Unplugging an active target exits fullscreen and returns the normal receiver window. The app never changes a monitor's display mode.
 
@@ -67,7 +69,7 @@ Active full-quality output holds a native Foundation `ProcessInfo` activity with
 | Exit fullscreen | Escape |
 | Mute this receiver | ⇧⌘M |
 | Reconnect | ⌘R |
-| Disconnect | ⇧⌘D |
+| Stop output | ⇧⌘D |
 | Show sources | ⌥⌘S |
 | Test pattern | ⌥⌘T |
 | Close / quit | ⌘W / ⌘Q |
@@ -135,7 +137,20 @@ For distribution, use `make release` after committing and pushing to the separat
 
 **OMTReceiver → Check for Updates…** and **Settings → Updates** use Sparkle's native dialogs. Automatic checks are configurable; scheduled checks show a toolbar reminder without interrupting fullscreen playback. Download, installation and restart require user action. Restart follows normal receiver/discovery cleanup. The updater is app-owned and shared across receiver windows.
 
-Both feed and update archives require Ed25519 signatures. OMTReceiver has a separate persistent Keychain signing identity (`com.suku.OMTReceiver-macOS`), and its public key is in the source Info.plist template. The eucaly private key is not reused. The first published release must provide the configured appcast before online update checks can succeed; no release has been published by these development commands.
+Both feed and update archives require Ed25519 signatures. OMTReceiver has a separate persistent Keychain signing identity (`com.suku.OMTReceiver-macOS`), and its public key is in the source Info.plist template. The eucaly private key is not reused. The [published macOS release](https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest) provides the [signed appcast](https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest/download/appcast.xml) used by online update checks.
+
+## Website
+
+The product site is static HTML/CSS in `site/`, hosted at [sukujgrg.github.io/OMTReceiver-macOS](https://sukujgrg.github.io/OMTReceiver-macOS/). It has no build step, package dependencies, JavaScript, or third-party analytics. Download links use GitHub's [latest release page](https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest), so new app releases need no website version changes.
+
+```sh
+make test-site                     # offline links, assets, navigation, and metadata checks
+python3 -m http.server 8000 --directory site
+```
+
+Open `http://localhost:8000` for a local preview.
+
+The **Publish website** workflow uploads `site/` directly after site changes reach `main`, or when run manually. GitHub Pages must use **GitHub Actions** as its publishing source. The standard `github-pages` environment allows deployments from `main`; the workflow uses a read-only build token and deployment-only Pages/OIDC permissions. Website publishing does not require Apple or Sparkle signing credentials and does not modify the Sparkle feed or release archives.
 
 ## Structure
 

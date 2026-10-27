@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10191c">
+  <meta name="description" content="Receive Open Media Transport video and audio in a native Mac app. Live source previews, display-aware full screen, and a built-in test pattern. Free and open source.">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="OMTReceiver for macOS">
+  <meta property="og:description" content="From your network. To your screen. A native Mac app for Open Media Transport video and audio.">
+  <meta property="og:url" content="https://sukujgrg.github.io/OMTReceiver-macOS/">
+  <meta property="og:image" content="https://sukujgrg.github.io/OMTReceiver-macOS/assets/app-icon.png">
+  <title>OMTReceiver — Open Media Transport for Mac</title>
+  <link rel="canonical" href="https://sukujgrg.github.io/OMTReceiver-macOS/">
+  <link rel="icon" type="image/png" href="assets/favicon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#" aria-label="OMTReceiver home">
+        <img src="assets/favicon.png" width="36" height="36" alt="">
+        <span>OMTReceiver <span class="brand-platform">for macOS</span></span>
+      </a>
+      <nav aria-label="Main navigation">
+        <a href="#features">Features</a>
+        <a href="#get-started">Get started</a>
+        <a href="https://github.com/sukujgrg/OMTReceiver-macOS" class="source-link">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero page-width" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="signal-dot" aria-hidden="true"></span> Open Media Transport · Mac</p>
+        <h1 id="hero-title">From your network.<br><span>To your screen.</span></h1>
+        <p class="hero-description">Receive OMT video and audio in a native Mac app. Browse live sources, choose a display, and put your picture on screen with a click.</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest">
+            <svg viewBox="0 0 20 20" width="20" height="20" fill="none" aria-hidden="true"><path d="M10 2.5v10m-4-4 4 4 4-4M4 13v3.5h12V13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Download for Mac
+          </a>
+          <a class="text-link" href="https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest">Release notes <span aria-hidden="true">↗</span></a>
+        </div>
+        <p class="download-meta"><span>Latest release</span><span class="meta-separator" aria-hidden="true">·</span><span>Apple Silicon · macOS 14 or later</span></p>
+        <p class="trust-note"><svg width="15" height="17" viewBox="0 0 15 17" fill="none" aria-hidden="true"><path d="m7.5 1 6 2.5V8c0 3.5-3 6-6 8-3-2-6-4.5-6-8V3.5l6-2.5Z" stroke="currentColor"/><path d="m4.5 8 2 2 4-4" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/></svg> Developer ID signed. Notarized by Apple.</p>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="icon-stage"><img src="assets/app-icon.png" width="512" height="512" alt="" fetchpriority="high"></div>
+        <div class="art-caption"><span>OMT IN</span><span class="caption-rule"></span><span>VIDEO + AUDIO</span></div>
+      </div>
+    </section>
+
+    <div class="capabilities page-width" aria-label="At a glance">
+      <span>Native AppKit interface</span>
+      <span>Metal video · Core Audio</span>
+      <span>Free &amp; open source</span>
+    </div>
+
+    <section class="workflow page-width section-space" id="features" aria-labelledby="workflow-title">
+      <div class="section-heading">
+        <p class="eyebrow">Find. Choose. Play.</p>
+        <h2 id="workflow-title">A clear view of<br>every source.</h2>
+        <p>Keep the controls close and the picture where it belongs. OMTReceiver handles discovery, playback, and display selection in one focused Mac app.</p>
+      </div>
+      <ol class="workflow-list">
+        <li><span class="step-number" aria-hidden="true">01</span><div><h3>Browse what’s live.</h3><p>Compatible OMT sources appear automatically on your local network. Silent live thumbnails let you see what’s available before choosing your output.</p></div></li>
+        <li><span class="step-number" aria-hidden="true">02</span><div><h3>Choose your display.</h3><p>Use your Mac’s main screen or a connected display. Set your preferred destination in Settings; it’s remembered the next time you open the app.</p></div></li>
+        <li><span class="step-number" aria-hidden="true">03</span><div><h3>Click to play.</h3><p>Click a source to open full-quality video and audio on your chosen display. Click another to switch. Press Escape to stop output and return to your sources.</p></div></li>
+      </ol>
+    </section>
+
+    <section class="details-section" aria-labelledby="details-title">
+      <div class="page-width details-inner">
+        <div class="details-heading">
+          <p class="eyebrow">Built for the signal</p>
+          <h2 id="details-title">Keep the source<br>in its element.</h2>
+          <p>No fixed 1080p timeline. No forced 30 fps. The receiver works with the dimensions and frame rates delivered by the OMT SDK.</p>
+          <a class="text-link" href="https://github.com/sukujgrg/OMTReceiver-macOS#video-and-audio-formats">Explore format support <span aria-hidden="true">↗</span></a>
+        </div>
+        <dl class="format-list">
+          <div><dt>Progressive &amp; interlaced</dt><dd>Receive progressive pictures or interlaced fields, with automatic or selectable deinterlacing for your display.</dd></div>
+          <div><dt>Color &amp; alpha</dt><dd>Rec.709 and Rec.601 SDR color handling. Composite keyed graphics over black, white, or a checkerboard background.</dd></div>
+          <div><dt>Video &amp; audio together</dt><dd>Full-quality playback uses Metal and Core Audio. Mute each receiver independently when monitoring multiple sources.</dd></div>
+          <div><dt>Room to monitor</dt><dd>Open independent receiver windows. Each browser supports up to 12 simultaneous reduced-resolution, silent previews.</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="getting-started page-width section-space" id="get-started" aria-labelledby="setup-title">
+      <div class="setup-heading">
+        <p class="eyebrow">A few steps to your first picture</p>
+        <h2 id="setup-title">Ready when<br>your source is.</h2>
+        <p>The OMT runtime is included. Get the latest release from GitHub, join your sender’s network, and allow local network access when macOS asks.</p>
+        <a class="button button-primary" href="https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest">Download for Mac <span aria-hidden="true">↓</span></a>
+        <p class="setup-requirements">Apple Silicon · macOS 14 or later</p>
+      </div>
+      <div class="setup-content">
+        <ol class="install-steps">
+          <li><strong>Install.</strong> Download the notarized ZIP from the latest GitHub release, open it, and move OMTReceiver to Applications.</li>
+          <li><strong>Connect.</strong> Start a compatible OMT sender on your network, then open OMTReceiver.</li>
+          <li><strong>Play.</strong> Choose your fullscreen display in Settings and click a live source.</li>
+        </ol>
+        <div class="test-pattern-note">
+          <span class="test-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+          <div><h3>No sender handy?</h3><p>The built-in animated Test Pattern lets you try playback and display selection right away.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="questions page-width" aria-labelledby="questions-title">
+      <h2 id="questions-title">A little more to know.</h2>
+      <div class="question-list">
+        <details><summary>Does it work with just one display?</summary><p>Yes. Your Mac’s main screen is the default fullscreen destination, so an external display is optional. Use Show Sources to bring the browser back, or press Escape to stop playback.</p></details>
+        <details><summary>Which OMT senders can I use?</summary><p>Any compatible Open Media Transport sender. OMTReceiver is a generic receiver; eucaly, official OMT tools, and the OMT plugin for OBS are examples. You can also connect directly to a sender address or configure an OMT Discovery Server in Settings.</p></details>
+        <details><summary>How do updates work?</summary><p>OMTReceiver includes Sparkle for signed updates. Choose Check for Updates in the OMTReceiver menu, or manage automatic checks in Settings. Installation and restart stay under your control.</p></details>
+        <details><summary>Where can I find help or build the app?</summary><p>The <a href="https://github.com/sukujgrg/OMTReceiver-macOS#readme">project README</a> covers setup, display behavior, format support, and building the complete Xcode project. If you run into a problem, <a href="https://github.com/sukujgrg/OMTReceiver-macOS/issues">open a GitHub issue</a> with your macOS version and source format.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer page-width">
+    <div class="footer-brand"><img src="assets/favicon.png" width="28" height="28" alt=""><span>OMTReceiver for macOS</span></div>
+    <nav aria-label="Project links"><a href="https://github.com/sukujgrg/OMTReceiver-macOS">Source code</a><a href="https://github.com/sukujgrg/OMTReceiver-macOS/issues">Support</a><a href="https://github.com/sukujgrg/OMTReceiver-macOS/blob/main/LICENSE">MIT License</a></nav>
+    <p>An independent receiver for Open Media Transport. Open Media Transport and related marks belong to their owners.</p>
+  </footer>
+</body>
+</html>
