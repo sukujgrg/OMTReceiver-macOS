@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var receivers: [ReceiverWindowController] = []
     private var settings: PreferencesWindowController?
     private var nextWindowNumber = 1
+    private var availableWindowNumbers: Set<Int> = []
     private var terminating = false
     private var testHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil }
     init(windowContext: @escaping @MainActor () -> (key: NSWindow?, main: NSWindow?) = { (NSApp.keyWindow, NSApp.mainWindow) }) {
@@ -73,9 +74,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     @objc func newReceiver(_ sender: Any?) {
         guard !terminating else { return }
-        let receiver = ReceiverWindowController(discovery: discovery, number: nextWindowNumber, updates: updates)
-        nextWindowNumber += 1
-        receiver.onClose = { [weak self] closed in self?.receivers.removeAll { $0 === closed } }
+        let number: Int
+        if let available = availableWindowNumbers.min() {
+            number = available
+            availableWindowNumbers.remove(available)
+        } else {
+            number = nextWindowNumber
+            nextWindowNumber += 1
+        }
+        let receiver = ReceiverWindowController(discovery: discovery, number: number, updates: updates)
+        receiver.onWindowWillClose = { [weak self] _ in self?.availableWindowNumbers.insert(number) }
+        receiver.onClose = { [weak self] closed in
+            guard let self, let index = self.receivers.firstIndex(where: { $0 === closed }) else { return }
+            self.receivers.remove(at: index)
+        }
         receiver.onCheckForUpdates = { [weak self] window in self?.presentUpdateDialog(from: window) }
         receiver.onRevealControls = { [weak self] window in
             guard let self else { return }

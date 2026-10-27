@@ -33,6 +33,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     private var audioError: String?
     private var videoError: String?
     private(set) var muted = false
+    var onWindowWillClose: ((ReceiverWindowController) -> Void)?
     var onClose: ((ReceiverWindowController) -> Void)?
     var onCheckForUpdates: ((NSWindow?) -> Void)?
     var onRevealControls: ((NSWindow?) -> Void)?
@@ -44,6 +45,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     var selectedSource: OMTSource? { session.source }
 
     init(discovery: OMTDiscoveryManager, number: Int, updates: AppUpdateViewModel? = nil,
+         frameAutosaveName: NSWindow.FrameAutosaveName? = nil,
          screens: @escaping () -> [NSScreen] = { NSScreen.screens }) {
         self.discovery = discovery; self.updates = updates; self.screens = screens
         let clock = PlaybackClock(); self.clock = clock
@@ -57,10 +59,17 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         window.collectionBehavior = [.fullScreenNone]
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        shouldCascadeWindows = false
         window.delegate = self
-        window.setFrameAutosaveName("ReceiverWindow\(number)")
-        if number == 1 { window.center() } else { window.cascadeTopLeft(from: NSPoint(x: 100 + number * 22, y: 800 - number * 22)) }
         build()
+        let savedFrame = frameAutosaveName ?? Self.defaultFrameAutosaveName(number: number)
+        // Restore the finished AppKit frame, including its toolbar. Register
+        // autosaving afterward so initial placement cannot overwrite a saved frame.
+        if !window.setFrameUsingName(savedFrame) {
+            if number == 1 { window.center() }
+            else { window.cascadeTopLeft(from: NSPoint(x: 100 + number * 22, y: 800 - number * 22)) }
+        }
+        window.setFrameAutosaveName(savedFrame)
         fullscreen = FullscreenController(owner: window, home: pictureHost, video: video, keepOwnerVisible: true, screens: screens)
         fullscreen.restoreOwnerFocus = { [weak self] in self?.sourceBrowser.focusSelectedSource() }
         fullscreen.onChange = { [weak self] in self?.fullscreenChanged() }
@@ -98,6 +107,16 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         updateState()
     }
     required init?(coder: NSCoder) { fatalError("Use init(discovery:number:updates:)") }
+
+    private static func defaultFrameAutosaveName(number: Int) -> NSWindow.FrameAutosaveName {
+        let name = "ReceiverWindow\(number)"
+        // NSWindow writes to standard defaults, independently of Preferences'
+        // isolated test suite. Tests and smoke runs must not replace user frames.
+        if CommandLine.arguments.contains("--smoke-test") || ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil {
+            return "OMTReceiver.Test.\(ProcessInfo.processInfo.processIdentifier).\(name)"
+        }
+        return name
+    }
 
     private func build() {
         guard let window else { return }
@@ -289,7 +308,20 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func finishShutdown() {
         let completions = shutdownCompletions; shutdownCompletions.removeAll(); completions.forEach { $0() }
     }
-    func windowWillClose(_ notification: Notification) { shutdown { [self] in onClose?(self) } }
+    func windowWillClose(_ notification: Notification) {
+        if let window, !window.frameAutosaveName.isEmpty {
+            window.saveFrame(usingName: window.frameAutosaveName)
+            // Closing does not release AppKit's name registration while this
+            // window is still retained during asynchronous receiver retirement.
+            window.setFrameAutosaveName("")
+        }
+        // The frame slot is reusable as soon as the native window closes;
+        // keep asynchronous media retirement on its separate completion path.
+        let windowWillClose = onWindowWillClose
+        onWindowWillClose = nil
+        windowWillClose?(self)
+        shutdown { [self] in onClose?(self) }
+    }
     func owns(_ candidate: NSWindow?) -> Bool { candidate.map { window === $0 || fullscreen?.owns($0) == true } ?? false }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) + [.receiverUpdate] }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.receiverSidebar, .flexibleSpace, .receiverMute, .receiverReconnect, .receiverFullscreen] }
