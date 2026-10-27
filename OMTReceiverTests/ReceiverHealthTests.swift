@@ -7,14 +7,44 @@ final class ReceiverHealthTests: XCTestCase {
         var videoOnly = ReceiverMediaHealth(startedAt: 10)
         XCTAssertNil(videoOnly.snapshot(at: 12))
         XCTAssertEqual(videoOnly.snapshot(at: 13)?.status, "Waiting for sender…")
+        XCTAssertEqual(videoOnly.snapshot(at: 13)?.videoState, .stalled)
         videoOnly.receivedVideo(format: "720p", at: 14)
         videoOnly.receivedVideo(format: "720p", at: 25)
         XCTAssertEqual(videoOnly.snapshot(at: 25)?.status, "Live", "Video-only senders must not require audio")
+        XCTAssertEqual(videoOnly.snapshot(at: 25)?.videoState, .live)
 
         var audioOnly = ReceiverMediaHealth(startedAt: 0)
         audioOnly.receivedAudio(format: "2 channels · 48000 Hz", at: 1)
         XCTAssertEqual(audioOnly.snapshot(at: 2)?.status, "Live Audio")
+        XCTAssertEqual(audioOnly.snapshot(at: 2)?.videoState, .waiting,
+                       "An audio-only source must not be classified as a stalled video stream")
         XCTAssertEqual(audioOnly.snapshot(at: 5)?.status, "Signal lost — reconnecting…")
+    }
+
+    func testSlowPreviewCadenceDoesNotBecomeStaleBetweenExpectedFrames() {
+        var preview = ReceiverMediaHealth(startedAt: 0)
+        // A 0.2 fps source legitimately has five seconds between pictures.
+        preview.receivedVideo(format: "720p · 0.2 fps", at: 1, timeout: 10)
+        XCTAssertEqual(preview.snapshot(at: 6)?.videoState, .live)
+        XCTAssertEqual(preview.snapshot(at: 11)?.videoState, .live)
+        XCTAssertEqual(preview.snapshot(at: 11.001)?.videoState, .stalled)
+        preview.receivedVideo(format: "720p · 0.2 fps", at: 12, timeout: 10)
+        XCTAssertEqual(preview.snapshot(at: 12)?.videoState, .live)
+
+        var playback = ReceiverMediaHealth(startedAt: 0)
+        playback.receivedVideo(format: "720p", at: 1)
+        XCTAssertEqual(playback.snapshot(at: 4)?.videoState, .live)
+        XCTAssertEqual(playback.snapshot(at: 4.001)?.videoState, .stalled,
+                       "Playback retains its existing three-second signal-loss policy")
+    }
+
+    func testPreviewVideoTimeoutDoesNotExtendAudioFreshness() {
+        var health = ReceiverMediaHealth(startedAt: 0)
+        health.receivedVideo(format: "720p · 0.2 fps", at: 1, timeout: 10)
+        health.receivedAudio(format: "stereo", at: 1)
+        XCTAssertEqual(health.snapshot(at: 5)?.videoState, .live)
+        XCTAssertEqual(health.snapshot(at: 5)?.status, "Audio lost — video live",
+                       "A slower video cadence must not conceal an audio interruption")
     }
 
     func testEachPreviouslySeenTrackLosesAndRecoversIndependently() {
@@ -23,6 +53,7 @@ final class ReceiverHealthTests: XCTestCase {
         health.receivedAudio(format: "stereo", at: 1)
         health.receivedAudio(format: "stereo", at: 4.1)
         XCTAssertEqual(health.snapshot(at: 4.1)?.status, "Video lost — audio live")
+        XCTAssertEqual(health.snapshot(at: 4.1)?.videoState, .stalled)
         XCTAssertEqual(health.snapshot(at: 4.1)?.format, "1080p", "Keep the last picture's format visible during a stall")
         health.receivedVideo(format: "1080p", at: 4.2)
         XCTAssertEqual(health.snapshot(at: 4.2)?.status, "Live")
@@ -38,6 +69,8 @@ final class ReceiverHealthTests: XCTestCase {
         health.receivedAudio(format: "stereo", at: 1)
         health.rejectedVideo(format: "unsupported codec", at: 1)
         XCTAssertEqual(health.snapshot(at: 1.1)?.status, "Unsupported or invalid video format")
+        XCTAssertEqual(health.snapshot(at: 1.1)?.videoState, .unsupported,
+                       "Continuing unsupported data must not look like an absent network stream")
         XCTAssertEqual(health.snapshot(at: 1.1)?.format, "unsupported codec")
         health.receivedAudio(format: "stereo", at: 5)
         XCTAssertEqual(health.snapshot(at: 5)?.status, "Video lost — audio live",

@@ -113,11 +113,17 @@ final class UpdateInterfaceTests: XCTestCase {
     }
 
     func testDisplayOwnershipReplacementAndExplicitDialogsRevealControls() async throws {
-        try XCTSkipIf(NSScreen.screens.isEmpty, "A native display is required")
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
         let driver = InterfaceUpdateDriver()
         let updates = AppUpdateViewModel(driver: driver); updates.start()
-        let first = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 923, updates: updates)
-        let second = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 924, updates: updates)
+        let first = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 923, updates: updates, screens: { [screen] })
+        let second = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 924, updates: updates, screens: { [screen] })
+        // This case requires controls and output on the same display. AppKit's
+        // default placement follows the key window left by earlier tests.
+        for controller in [first, second] {
+            controller.window?.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 40, y: screen.visibleFrame.minY + 40))
+            XCTAssertEqual(controller.window?.screen.map(DisplayCatalog.identifier), DisplayCatalog.identifier(for: screen))
+        }
         first.toggleFullscreen(nil); second.toggleFullscreen(nil)
         defer { first.revealControlsForDialog(); second.revealControlsForDialog() }
         let settings = PreferencesWindowController(discovery: OMTDiscoveryManager(), updates: updates)

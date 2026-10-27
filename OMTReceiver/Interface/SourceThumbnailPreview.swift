@@ -20,6 +20,35 @@ extension SourceThumbnailPreviewing {
     func retry() {}
 }
 
+/// Evaluated by the session's existing health updates, without another timer.
+/// Successful video resets the delay; failed connection attempts retain it.
+struct PreviewReconnectBackoff {
+    private var nextDelay: TimeInterval = 1
+    private var retryAt: TimeInterval?
+
+    mutating func shouldReconnect(videoState: ReceiverMediaHealth.VideoState, at time: TimeInterval) -> Bool {
+        switch videoState {
+        case .live:
+            reset()
+        case .waiting, .unsupported:
+            retryAt = nil
+        case .stalled:
+            guard let retryAt else {
+                self.retryAt = time + nextDelay
+                return false
+            }
+            if time >= retryAt {
+                self.retryAt = nil
+                nextDelay = min(30, nextDelay * 2)
+                return true
+            }
+        }
+        return false
+    }
+
+    mutating func reset() { nextDelay = 1; retryAt = nil }
+}
+
 @MainActor
 final class SourceThumbnailPreview: SourceThumbnailPreviewing {
     let source: OMTSource
@@ -30,11 +59,12 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
     private var rendererError: String?
     private var started = false
     private var stopped = false
+    private var reconnectBackoff = PreviewReconnectBackoff()
     private var preferenceObserver: NSObjectProtocol?
 
     var statusText: String { rendererError ?? session.statusText }
     var formatText: String { session.formatText }
-    var canRetry: Bool { started && !stopped && session.isTerminalFailure }
+    var canRetry: Bool { started && !stopped && (session.isTerminalFailure || session.videoState == .stalled) }
 
     init(source: OMTSource) {
         self.source = source
@@ -52,7 +82,7 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
             self.rendererError = self.video.errorMessage
             self.onChange?()
         }
-        session.onChange = { [weak self] in self?.onChange?() }
+        session.onChange = { [weak self] in self?.sessionChanged() }
         preferenceObserver = NotificationCenter.default.addObserver(
             forName: .receiverPreferencesChanged, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.applyPreferences() } }
@@ -68,6 +98,7 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
 
     func stop(completion: @escaping @MainActor @Sendable () -> Void) {
         stopped = true
+        reconnectBackoff.reset()
         video.isPaused = true
         // ReceiverSession cancellation fences frame admission before clearing.
         session.stop { [self] in
@@ -80,8 +111,27 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
     /// instance is fully destroyed before another instance can be created.
     func retry() {
         guard canRetry else { return }
+        reconnectBackoff.reset()
+        restart()
+    }
+
+    private func sessionChanged() {
+        guard started, !stopped else { return }
+        let state = session.isTerminalFailure ? ReceiverMediaHealth.VideoState.unsupported : session.videoState
+        if reconnectBackoff.shouldReconnect(videoState: state, at: ProcessInfo.processInfo.systemUptime) {
+            restart()
+        } else {
+            onChange?()
+        }
+    }
+
+    private func restart() {
+        // Cancel frame admission before clearing. The serial receive queue
+        // destroys the old SDK receiver before starting its replacement.
+        session.disconnect()
         video.clear()
-        session.reconnect()
+        guard started, !stopped else { return }
+        session.connect(source)
     }
 
     private func applyPreferences() {

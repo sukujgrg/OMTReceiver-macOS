@@ -4,6 +4,66 @@ import XCTest
 
 @MainActor
 final class PreviewRetryTests: XCTestCase {
+    func testAutomaticRetryBackoffIsBoundedAcrossUnsuccessfulConnections() {
+        var backoff = PreviewReconnectBackoff()
+        for (attempt, delay) in [1.0, 2, 4, 8, 16, 30, 30].enumerated() {
+            let stalledAt = Double(attempt) * 100
+            XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: stalledAt))
+            XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: stalledAt + delay - 0.001))
+            XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: stalledAt + delay),
+                          "A continuously unavailable sender must back off without exceeding the 30-second delay")
+            XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: stalledAt + delay + 0.001),
+                           "Starting the next connection must not reset consecutive-failure backoff")
+        }
+    }
+
+    func testReceivingVideoCancelsPendingRetryAndResetsBackoff() {
+        var backoff = PreviewReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 1))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 1.1))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 2))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .live, at: 3))
+        for time in [4.0, 10, 30, 100] {
+            XCTAssertFalse(backoff.shouldReconnect(videoState: .live, at: time),
+                           "Healthy frame arrivals must never cause periodic receiver resets")
+        }
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101.999))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 102),
+                      "A new loss after successful reception starts with the initial delay")
+    }
+
+    func testWaitingAndUnsupportedVideoCancelObsoleteRetryDeadlines() {
+        var backoff = PreviewReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 0.5))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 2))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .unsupported, at: 3))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 4))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 5))
+
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 5.1))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .unsupported, at: 6))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 10))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 11))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 12),
+                      "A connecting or unsupported source must not silently clear failure history")
+    }
+
+    func testExplicitResetDiscardsThePendingAutomaticRetry() {
+        var backoff = PreviewReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 1))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 1.1))
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 2))
+        backoff.reset()
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 100),
+                       "A stopped or manually restarted preview must not retain an old retry deadline")
+        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101))
+        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 102))
+    }
+
     func testOnlyActiveFailedPreviewCanRetryWithoutBypassingRetirementBudget() {
         let first = OMTSource(id: "retry:first", name: "First", address: "first")
         let second = OMTSource(id: "retry:second", name: "Second", address: "second")
@@ -56,6 +116,32 @@ final class PreviewRetryTests: XCTestCase {
         preview.retry()
         try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertFalse(preview.canRetry, "A stopped tile cannot be revived by a delayed menu command")
+    }
+
+    func testRetryDoesNotReconnectIfDisconnectedNotificationStopsPreview() async throws {
+        XCTAssertNil(OMTSDKRuntime.shared.load())
+        let source = OMTSource(id: "retry:retired-during-restart", name: "Invalid", address: "")
+        let preview = SourceThumbnailPreview(source: source)
+        preview.start()
+        await waitForFailure(preview)
+        XCTAssertTrue(preview.canRetry)
+
+        let stopped = expectation(description: "Preview retires during the retry's disconnect notification")
+        var requestedStop = false
+        preview.onChange = { [weak preview] in
+            guard let preview, !requestedStop, preview.statusText == "Disconnected" else { return }
+            requestedStop = true
+            preview.stop { stopped.fulfill() }
+        }
+        defer { preview.onChange = nil }
+
+        preview.retry()
+        XCTAssertTrue(requestedStop, "The observer must retire the preview synchronously during restart")
+        XCTAssertEqual(preview.statusText, "Disconnected", "Restart must not recreate a receiver after its observer stops the tile")
+        await fulfillment(of: [stopped], timeout: 2)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(preview.statusText, "Disconnected", "Queued receiver updates must not revive a retired preview")
+        XCTAssertFalse(preview.canRetry)
     }
 
     private func waitForFailure(_ preview: SourceThumbnailPreview) async {

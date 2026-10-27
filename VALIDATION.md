@@ -1,3 +1,13 @@
+# Stalled preview recovery — 28 October 2026
+
+Preview recovery now responds to typed video health from the existing receiver health updates. A stalled thumbnail reopens only its own SDK receiver, with bounded retry delays from 1 to 30 seconds; fresh video resets the delay. Manual Retry Preview is enabled during signal loss as well as terminal failure. Cancellation fences old frame admission before clearing, and the existing serial worker destroys the previous receiver before replacement. Retirement cancels recovery, including a synchronous stop from a state-change observer. Full-quality video/audio reception and the SDK's normal reconnect behavior are unchanged.
+
+Three real-SDK network regressions use isolated loopback TCP fault proxies. An outage drains and discards preview data while leaving old sockets open; restoring the path permits only new connections. Automatic recovery must establish a fresh connection and deliver a newly consumed preview frame. Manual retry must supersede its pending automatic retry, and stopping during backoff must prevent recreation. A separate full-quality receiver must remain Live throughout, with advancing video/audio counters and exactly the same two TCP connections. These are controlled network fault tests, not a physical-camera unplug qualification.
+
+The final native suite passed **109 tests, zero failures, one optional eucaly skip**. The **118 offline checks** passed (9 signed-feed, 105 release-workflow and 4 website tests). New deterministic coverage checks backoff limits/reset, stop reentrancy, typed media health and low-frame-rate preview freshness. An existing dialog test's same-display assumption was corrected by explicitly placing its controls on its injected output display, preserving its window-level assertion; fullscreen production code was not changed. Logs: `build/Logs/preview-recovery-tests.log` and `build/Logs/preview-recovery-native-final.log`.
+
+---
+
 # Dedicated notarization integration — 28 October 2026
 
 The dedicated-notary worktree integrates all completed follow-up receiver changes and the owner's `OMTSender/` ignore rule. No sender-project files are part of this repository. The completed audio QoS/teardown, playback activity, visibility, accessibility and controls-routing evidence below is retained.
