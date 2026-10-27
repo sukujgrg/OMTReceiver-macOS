@@ -24,9 +24,22 @@ The release commands fail clearly when these prerequisites are missing. They do 
 
 ## Normal release
 
-1. Change `VERSION` to the next numeric `X.Y` or `X.Y.Z`, optionally using `scripts/set-version.sh 1.1`.
-2. Commit and merge or push to `main`, then update the local checkout.
-3. Run `make release`.
+Finish and commit the application changes first. Run one build or test at a time in a checkout: concurrent `make build`, `make test`, Xcode archives, or `make clean` can collide in DerivedData. Finish those commands before preparing a release.
+
+From a clean checkout, use the next unpublished version. This example shows `1.2.3`; replace it with the version you intend to publish:
+
+```sh
+git switch main
+git pull --ff-only
+git status --short                 # must be empty before changing VERSION
+scripts/set-version.sh 1.2.3
+git add VERSION
+git commit -m "Release 1.2.3"
+git push origin main
+make release
+```
+
+The version bump must be committed and pushed too, even if the application changes were already pushed. Existing Keychain credentials are reused: the dedicated `OMTReceiverNotary` profile and Sparkle account `com.suku.OMTReceiver-macOS` need no new password or key for each release. `make release-check` is an optional preflight; `make release` performs the same checks automatically.
 
 The command requires a clean checkout, derives the repository from the exact HTTPS push URL, checks it against the embedded feed URL, and waits for the latest successful **Validate** push run on `main` for the same source commit. It then:
 
@@ -54,7 +67,16 @@ A genuinely empty release repository can create its first signed appcast. Once a
 | `make release-publish` | Publish verified saved artifacts without rebuilding/notarizing. |
 | `make clean` | Remove caches while preserving `build/release/`. |
 
-Optional release notes must be outside the checkout: `make release NOTES_FILE=/tmp/omt-notes.md`. They are saved before publication so retries retain the same text. The release engine never force-pushes tags or replaces uploaded release assets.
+For custom release notes, write a file outside the checkout, then use it instead of the plain `make release` command:
+
+```sh
+cat > /tmp/omt-notes.md <<'EOF'
+Describe the changes users will receive.
+EOF
+make release NOTES_FILE=/tmp/omt-notes.md
+```
+
+Notes are saved before publication so retries retain the same text. The release engine never force-pushes tags or replaces uploaded release assets.
 
 ## Saved work and retries
 
