@@ -1,3 +1,13 @@
+# Dedicated notarization integration — 28 October 2026
+
+The dedicated-notary worktree integrates all completed follow-up receiver changes and the owner's `OMTSender/` ignore rule. No sender-project files are part of this repository. The completed audio QoS/teardown, playback activity, visibility, accessibility and controls-routing evidence below is retained.
+
+The release Make targets and direct CLI now default to **OMTReceiverNotary**, with no automatic fallback to eucaly's profile. `make setup-notarization` requires an interactive local Terminal and lets Apple's tool prompt directly; the password is not accepted in Make/CLI arguments, exported through an environment variable or saved in project files. A genuinely new Apple app-specific password still needs to be generated and entered by the owner. No existing Keychain credential was inspected, copied, changed or revoked during this integration.
+
+The combined `make test` passed **88 native tests, zero failures, one optional eucaly skip**, plus **114 offline checks** (9 signed-feed and 105 release-workflow tests). Added regressions verify the dedicated CLI/Make defaults, explicit custom-profile propagation across every notary operation, and refusal to access credentials from a noninteractive setup command. Integration log: `build/Logs/combined-notary-review-test.log` in the dedicated-notary worktree.
+
+---
+
 # Core Audio teardown QoS repair — 28 October 2026
 
 The earlier native trace correctly located a synchronous wait inside `AVAudioPlayerNode.stop()`, but stopping at the framework stack missed two app-side causes: `AudioPlayer` classified its non-real-time graph-control queue as `.userInteractive`, and its finalizer could call native stop directly on the main/UI thread.
