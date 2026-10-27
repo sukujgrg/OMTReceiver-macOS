@@ -64,12 +64,19 @@ final class WindowFrameTests: XCTestCase {
         let browser = try XCTUnwrap(first.window)
         browser.setFrame(try frame(width: 870, height: 580, inset: 45), display: true)
         let saved = browser.frame
+        var frameChanges: [String] = []
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification, object: browser, queue: nil) { _ in
+            MainActor.assumeIsolated {
+                frameChanges.append("Frame: \(browser.frame), minimum: \(browser.minSize), content minimum: \(browser.contentMinSize)\n" + Thread.callStackSymbols.prefix(24).joined(separator: "\n"))
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
         first.connect(.testPattern)
         XCTAssertTrue(first.isFullscreen)
         let output = try XCTUnwrap(NSApp.windows.first { first.owns($0) && $0 !== browser })
         XCTAssertTrue(output.frameAutosaveName.isEmpty, "The temporary fullscreen surface must not own browser preferences")
         XCTAssertFalse(output.isRestorable)
-        XCTAssertEqual(browser.frame, saved)
+        XCTAssertEqual(browser.frame, saved, "Native resize history:\n" + frameChanges.joined(separator: "\n\n"))
         await close(first)
         XCTAssertFalse(first.isFullscreen)
 
