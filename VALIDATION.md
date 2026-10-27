@@ -1,3 +1,43 @@
+# Version 1.2.1 independent review — 28 October 2026
+
+A separate fresh chat reviewed the original `ed7c7a0` app independently against current Apple guidance and inspected the installed UI. Separate engineering reviews checked media lifetimes, buffering, discovery and tests. Follow-up review found no remaining blocking issue in the repaired ownership, control presentation, retry, error-health and geometry paths. This is bounded qualification, not a promise that every hardware/network combination is issue-free.
+
+## Root causes repaired
+
+| Area | Repair and evidence |
+| --- | --- |
+| Hidden/stacked output | A weak, main-actor display registry assigns one fullscreen owner per physical display. Replacement exits the displaced receiver through its normal video/audio teardown. A → B → A activation is covered. |
+| Single-display operation | Same-screen viewing uses normal window level/current Space; external projection retains its separate projection policy. Tests inject exactly one screen, exercise a missing saved external UUID, source switching, controls, Escape and Close Window. Browser movement refreshes presentation policy. |
+| Native controls during playback | Showing Sources, Settings, updates or a connection sheet changes window order rather than disconnecting the receiver. Retargeting preserves the current controls window and its intent until explicit output activation; native window-order regressions cover this. |
+| Wrong keyboard source | Native card action tests exposed additive programmatic collection selection. Activation, focus restoration and snapshot restoration now replace the selection atomically. A second-source click leaves only that source selected. |
+| Pointer activation | Cards use native NSButton release-inside tracking. App code has no mouse-down activation or custom tracking loop. Unit tests cover action/selection/hit identity and accessibility; real standalone drag cancellation and double-click behavior were qualified separately. |
+| Track freshness | Video and audio have independent health and recovery states. Real SDK regression keeps audio flowing while video stops, asserts partial loss, then recovery. Rejected video cannot become a falsely healthy audio-only source. |
+| Oversized PCM | Every admitted chunk fits the 300 ms incoming bound; oversized planar PCM keeps the newest sample-aligned window with adjusted timestamps. The 350 ms scheduled bound and source/renderer epoch fences have hardware-independent regressions across sample rates. |
+| Persistent false errors | Audio and video expose current health instead of stale error payloads. Successful scheduling/allocation clears transient errors; old-source errors are fenced. Fatal renderer initialization errors remain visible. |
+| Preview recovery | Terminal worker failure is generation-scoped. Control-click → Retry Preview deliberately reconnects only an active failed preview without bypassing retirement or the preview budget. |
+| Accessibility and identification | Playback popups have explicit accessible names; changed card values post notifications. Output titles track source changes. Receiver-specific commands do not silently target another window while Settings is key. |
+| Interlaced edges and camera housing | GPU field reconstruction clamps before field-parity selection, preventing opposite-field contamination at scaled edges. Fullscreen retains a black full-screen background while fitting video inside NSScreen safe-area insets. |
+
+The native-button choice follows Apple's documented [transparent-button tracking behavior](https://developer.apple.com/documentation/appkit/nsbuttoncell/istransparent). Fullscreen/control and camera-housing decisions were checked against [Apple fullscreen guidance](https://developer.apple.com/design/human-interface-guidelines/going-full-screen) and [NSScreen safe areas](https://developer.apple.com/documentation/appkit/nsscreen/safeareainsets); control names follow [Apple's VoiceOver criteria](https://developer.apple.com/help/app-store-connect/manage-app-accessibility/voiceover-evaluation-criteria/).
+
+## Automated and interoperability evidence
+
+`make test` with the isolated eucaly endpoint: **78 native tests, zero failures, zero skips**, plus **111 offline release/feed checks**. The final result is `Test-OMTReceiver-2026.10.28_01-26-44-+1100.xcresult`; log: `build/Logs/make-test-1.2.1-review-final.log`.
+
+New coverage includes seven audio scheduling/admission tests, seven actual video-mailbox policy tests, four media-health tests, two preview retry tests, three renderer health/allocation tests, scaled GPU field edges, display ownership, single-screen fallback, safe-area geometry, dialog ordering, receiver command context and atomic source selection. Existing SDK transport, malformed-frame, color/alpha, reconnect and updater tests remain enabled.
+
+The genuine eucaly production compositor/helper fixture was launched using prebuilt test products, a fresh run ID and explicit 180-second bound, with no operator library or native projection. Its verified helper endpoint supplied 1920×1080p30 Rec.709 and stereo 48 kHz PCM to the receiver, actual Metal presentation and Core Audio graph, plus Bonjour discovery. The receiver test passed with no current audio error. Sender run `D02349E1-FE98-4CDE-9011-07402305D368` completed with zero active outputs, all owned helpers/native windows retired and no invariant violations. Evidence: `build/eucaly-review-1.2.1/`.
+
+The initial hosted Validate run also passed: [40513240573](https://github.com/sukujgrg/OMTReceiver-macOS/actions/runs/40513240573). The updated [hosted workflow](https://github.com/sukujgrg/OMTReceiver-macOS/actions/workflows/validate.yml) checks generated-project consistency, pinned SDK hashes, tests, Release archive, arm64 slices and Sparkle metadata, and preserves diagnostics even on failure. Hosted checks skip only environment-dependent cases when no second display or isolated eucaly sender exists; those cases ran locally without skips.
+
+## Native observation and scope
+
+The signed 1.2.1 app was inspected through native UI automation. Actual thumbnail click, drag-out cancellation, subsequent double-click, Return activation, moving full-quality main-display picture, Escape, Close Window, Settings retargeting without focus loss, connection-sheet cancellation preserving Playing, and named Settings controls were observed. The saved DELL P2721Q destination was restored afterward. Native synthetic pointer injection in the inactive XCTest app could not reproduce a real WindowServer event stream; those diagnostic attempts were removed rather than presented as passing physical UI tests. App-owned button action/selection assertions remain automated and caught the real multi-selection defect.
+
+Single-display tests expose exactly one screen even on the local two-display Mac; the hosted runner also has no second display. Native main-display viewing was checked with the external monitor still physically connected. Physical hot-unplug, camera-housing hardware, sleep/wake/screen-saver behavior, sustained 12-source load, audible quality and measured end-to-end A/V synchronization remain separate hardware qualification. No signed distribution release was published during this review.
+
+---
+
 # Version 1.2 validation — 28 October 2026
 
 Version 1.2 replaces the sidebar/player workflow with a native live source grid. Single-click starts a separate full-quality fullscreen receiver; the browser remains available on another display. Clicking the same source keeps output running, clicking a different source switches it, and Escape stops output and restores grid focus.

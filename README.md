@@ -1,5 +1,7 @@
 # OMTReceiver for macOS
 
+[![Validate](https://github.com/sukujgrg/OMTReceiver-macOS/actions/workflows/validate.yml/badge.svg)](https://github.com/sukujgrg/OMTReceiver-macOS/actions/workflows/validate.yml)
+
 A standalone **AppKit macOS application** for receiving Open Media Transport video and audio. This is a complete Xcode application project, with independent receiver windows, native source lists, menus, Settings, display-aware fullscreen, Metal video and Core Audio playback. The application UI uses AppKit throughout; eucaly is used only as a testing reference and optional sender.
 
 ## Build and run
@@ -33,23 +35,25 @@ See [release setup and recovery](docs/releasing.md) and [Sparkle self-updates](d
 
 The normal window shows **live source thumbnails**. Bonjour (`_omt._tcp`) and SDK discovery sources appear automatically, alongside a built-in animated Test Pattern. **Single-click any thumbnail to receive that source at full quality on the configured fullscreen display.** Return or Space opens the keyboard-selected source. Arrow keys browse without switching output; the Playing badge identifies the source currently on the display.
 
-When output is on an external display, the browser stays available on the controls display. Click another thumbnail to switch the existing output. Clicking the same source again keeps it playing. Escape stops that window's fullscreen video/audio and returns focus to the grid. The output picture itself is not a second activation step.
+When output is on an external display, the browser stays available on the controls display. Click another thumbnail to switch the existing output. Clicking the same source again keeps it playing. Escape stops that window's fullscreen video/audio and returns focus to the grid. The output picture itself is not a second activation step. Activation uses native release-inside button tracking, so dragging away before release cancels a click.
 
-Each browser has a budget of **12 simultaneous live previews**, including receivers still retiring. The source list can contain more sources; scrolling retires offscreen previews and starts visible ones. Fully hidden/minimized browsers stop preview reception. Cards beyond the active budget clearly show Preview paused. Previews request the SDK's video-only reduced-resolution mode (one eighth of each dimension) and display up to 15 fps, with no audio connection. Fullscreen uses a separate original-format video/audio receiver. If a sender ignores preview mode, its thumbnail reports Preview unavailable rather than continuously decoding a full-resolution fallback.
+Each browser has a budget of **12 simultaneous live previews**, including receivers still retiring. The source list can contain more sources; scrolling retires offscreen previews and starts visible ones. Fully hidden/minimized browsers stop preview reception. Cards beyond the active budget clearly show Preview paused. Previews request the SDK's video-only reduced-resolution mode (one eighth of each dimension) and display up to 15 fps, with no audio connection. Fullscreen uses a separate original-format video/audio receiver. If a sender ignores preview mode, its thumbnail reports Preview unavailable rather than continuously decoding a full-resolution fallback. Control-click a failed thumbnail and choose **Retry Preview** after correcting its sender; retries retain the same preview budget.
 
-This is a connection/rendering budget, not a guaranteed throughput or total-memory limit: the pinned SDK still allocates some decoder resources using each source's original dimensions. Capacity depends on the Mac, source formats and network. Multiple browser windows have independent budgets and outputs.
+This is a connection/rendering budget, not a guaranteed throughput or total-memory limit: the pinned SDK still allocates some decoder resources using each source's original dimensions. Capacity depends on the Mac, source formats and network. Multiple browser windows have independent preview budgets and source/mute state. Each physical display has one fullscreen owner: activating output from another browser on that display stops the displaced video and audio.
 
-**File → New Receiver Window** opens another independent source browser/output. Each output has its own mute state; mute duplicate outputs to avoid hearing a source twice. Audio uses the current macOS default output device.
+**File → New Receiver Window** opens another independent source browser/output. Each browser remembers its own output mute state. Audio uses the current macOS default output device.
 
 **Connect to Address…** accepts the sender's actual TCP address, for example `omt://192.168.1.20:6400`, `sender.local:6500`, or `omt://[::1]:6400`, and opens it fullscreen. No fixed sender port is assumed. Discovery never selects an output for you, and a playing source remains represented if its advertisement temporarily disappears.
 
-The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. **Reconnect** creates a fresh full-quality receiver; **Disconnect** stops that output. The silent browser previews remain independent.
+The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. **Reconnect** creates a fresh full-quality receiver; **Disconnect** stops that output. The silent browser previews remain independent. Video and audio freshness are tracked separately, so continuing audio cannot conceal frozen video (or the reverse).
 
 ## Fullscreen and displays
 
 Click a live source thumbnail, use the toolbar button, or choose **View → Enter Fullscreen**. A full-quality video surface is presented in an AppKit borderless window covering the chosen `NSScreen`, independently of the thumbnail surfaces. Escape closes output and keeps the browser window and geometry intact.
 
 **Settings → Fullscreen display** defaults to the system's main display. A chosen display is saved by its persistent Core Graphics UUID, rather than its transient numeric display ID. The list updates when displays change, and changing the preference moves an active fullscreen view immediately. If the target is absent when entering fullscreen, the main display is used. Unplugging an active target exits fullscreen and returns the normal receiver window. The app never changes a monitor's display mode.
+
+A single-display Mac needs no external monitor. Fullscreen uses its main screen and yields normally when switching apps. **Show Sources**, Settings, updates, and connection dialogs reveal controls without disconnecting playback; click the playing thumbnail to raise the same output again. Escape or Close Window while output is key explicitly stops it. Fullscreen video fits within the screen’s camera-housing safe area, with black around the unobscured picture.
 
 | Action | Shortcut |
 | --- | --- |
@@ -109,6 +113,8 @@ Use eucaly's existing `scripts/test-omt-production-stress.py` fixture with its r
 ## SDK replacement and distribution
 
 `Vendor/OMT` contains SDK 1.0.0.19 from the existing eucaly integration: an unmodified pinned-upstream NativeAOT arm64 transport, the original VMX codec, C header, MIT/NativeAOT notices and provenance. No standalone .NET runtime is needed. See `Vendor/OMT/provenance.json`, `BUILDING.md` and `PATCHES.md` for exact hashes/source commits and the inactive historical patches.
+
+The documents inside `Vendor/OMT` are preserved provenance from eucaly's sender integration. Their helper process, fixed output format and eucaly commands describe that sender. **OMTReceiver loads the bundled SDK in its own process**, owns receiver/discovery workers, and accepts the source formats described above. Use this README for receiver behavior; the historical documents and their recorded hashes remain unchanged. CI verifies the pinned SDK files before building and checks that regenerating the Xcode project produces no changes. Test result bundles and native build/test logs are retained as validation artifacts, including on failed runs.
 
 For another ABI-compatible SDK, arrange `include/libomt.h`, `lib/libomt.dylib` and `lib/libvmx.dylib` beneath one folder, then set the **OMT_SDK_ROOT** Xcode build setting to its absolute path. For example:
 

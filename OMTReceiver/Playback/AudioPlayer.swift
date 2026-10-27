@@ -5,27 +5,35 @@ import os
 /// Planar Float32 admission is bounded before dispatch. AVAudioEngine converts
 /// only the device sample rate/channel layout; source PCM retains its sample rate.
 final class AudioPlayer: @unchecked Sendable {
-    var onError: (@Sendable (String) -> Void)?
+    /// A notification is a prompt to read current state, never an error payload
+    /// that could outlive its source while waiting for the main actor.
+    var onStateChange: (@Sendable () -> Void)?
     private let clock: PlaybackClock
     private let lock = NSLock()
+    private var healthError: String?
+    var errorMessage: String? { lock.lock(); defer { lock.unlock() }; return healthError }
     private let queue = DispatchQueue(label: "OMTReceiver.audio", qos: .userInteractive)
     private let signal: DispatchSourceUserDataAdd
-    private var incoming: [AudioFrame] = []
-    private var incomingDuration: Double = 0
+    private var incoming = AudioFrameQueue()
     private var muted = false
     private var resetPending = false
     private var generation: UInt64 = 0
     // Below is owned exclusively by queue.
-    private var engine: AVAudioEngine?
-    private var player: AVAudioPlayerNode?
-    private var format: AVAudioFormat?
+    private let makeRenderer: @Sendable (Double, Int) throws -> any AudioRendering
+    private var renderer: (any AudioRendering)?
+    private var renderSampleRate: Double?
+    private var renderChannels: Int?
     private var scheduledDuration: Double = 0
     private var renderGeneration: UInt64 = 0
     private var configurationObserver: NSObjectProtocol?
     private let logger = Logger(subsystem: "com.suku.OMTReceiver.macOS", category: "Audio")
 
-    init(clock: PlaybackClock = PlaybackClock()) {
+    init(clock: PlaybackClock = PlaybackClock(),
+         makeRenderer: @escaping @Sendable (Double, Int) throws -> any AudioRendering = {
+             try CoreAudioRenderer(sampleRate: $0, channels: $1)
+         }) {
         self.clock = clock
+        self.makeRenderer = makeRenderer
         signal = DispatchSource.makeUserDataAddSource(queue: queue)
         signal.setEventHandler { [weak self] in self?.drain() }
         signal.resume()
@@ -34,24 +42,18 @@ final class AudioPlayer: @unchecked Sendable {
         ) { [weak self] notification in
             guard let self else { return }
             self.queue.async { [weak self] in
-                guard let self, let changed = notification.object as? AVAudioEngine,
-                      changed === self.engine else { return }
+                guard let self, let changed = notification.object as AnyObject?,
+                      changed === self.renderer?.configurationObject else { return }
                 self.retireEngine()
             }
         }
     }
 
     func enqueue(_ frame: AudioFrame) {
-        guard frame.sampleRate.isFinite, (8000...384000).contains(frame.sampleRate),
-              (1...32).contains(frame.channels), (1...131072).contains(frame.samplesPerChannel),
-              frame.data.count >= frame.channels * frame.samplesPerChannel * 4 else { return }
-        let duration = Double(frame.samplesPerChannel) / frame.sampleRate
+        guard let admitted = AudioFrameQueue.normalized(frame) else { return }
         lock.lock()
-        if incoming.count >= 32 || incomingDuration + duration > 0.300 {
-            incoming.removeAll(keepingCapacity: true); incomingDuration = 0
-            resetPending = true
-        }
-        incoming.append(frame); incomingDuration += duration
+        let droppedBacklog = incoming.append(admitted.frame)
+        resetPending = resetPending || admitted.trimmed || droppedBacklog
         lock.unlock()
         signal.add(data: 1)
     }
@@ -64,94 +66,83 @@ final class AudioPlayer: @unchecked Sendable {
     /// Clears this epoch without making the main thread wait for Core Audio.
     func stop() {
         lock.lock()
-        incoming.removeAll(keepingCapacity: false); incomingDuration = 0
+        incoming.removeAll()
         resetPending = true; generation &+= 1
+        let healthChanged = healthError != nil
+        healthError = nil
         lock.unlock()
         clock.reset()
         signal.add(data: 1)
+        if healthChanged { onStateChange?() }
     }
 
     private func drain() {
         lock.lock()
-        let frames = incoming; incoming.removeAll(keepingCapacity: true)
-        incomingDuration = 0
+        let frames = incoming.takeAll()
         let reset = resetPending; resetPending = false
         let isMuted = muted
         let token = generation
         lock.unlock()
         if reset { retireEngine() }
-        player?.volume = isMuted ? 0 : 1
+        renderer?.setVolume(isMuted ? 0 : 1)
         for frame in frames {
             lock.lock(); let stillCurrent = generation == token; lock.unlock()
             guard stillCurrent else { return }
             do {
                 try prepare(sampleRate: frame.sampleRate, channels: frame.channels)
-                guard let player, let format,
-                      let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                          frameCapacity: AVAudioFrameCount(frame.samplesPerChannel)),
-                      let planes = buffer.floatChannelData else { continue }
-                player.volume = isMuted ? 0 : 1
-                buffer.frameLength = AVAudioFrameCount(frame.samplesPerChannel)
-                frame.data.withUnsafeBytes { bytes in
-                    guard let base = bytes.baseAddress else { return }
-                    for channel in 0..<frame.channels {
-                        memcpy(planes[channel], base.advanced(by: channel * frame.samplesPerChannel * 4),
-                               frame.samplesPerChannel * 4)
-                    }
-                }
-                let duration = Double(frame.samplesPerChannel) / frame.sampleRate
-                if scheduledDuration + duration > 0.350 {
-                    player.stop(); scheduledDuration = 0; renderGeneration &+= 1
-                    player.play()
+                guard let renderer else { continue }
+                renderer.setVolume(isMuted ? 0 : 1)
+                let duration = frame.duration
+                if scheduledDuration + duration > AudioFrameQueue.maximumScheduledDuration {
+                    renderer.reset(); scheduledDuration = 0; renderGeneration &+= 1
                 }
                 // Fence the actual Core Audio admission, including the clock
                 // mapping, against a source switch during graph preparation.
                 lock.lock()
-                guard generation == token else { lock.unlock(); return }
-                let host = clock.presentationTime(for: frame.timestamp)
-                let presentation = AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: host))
-                scheduledDuration += duration
-                let renderToken = renderGeneration
-                player.scheduleBuffer(buffer, at: presentation,
-                    options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
-                    self?.queue.async { [weak self] in
-                        guard let self, self.renderGeneration == renderToken else { return }
-                        self.scheduledDuration = max(0, self.scheduledDuration - duration)
+                do {
+                    defer { lock.unlock() }
+                    guard generation == token else { return }
+                    let host = clock.presentationTime(for: frame.timestamp)
+                    scheduledDuration += duration
+                    let renderToken = renderGeneration
+                    try renderer.schedule(frame, hostTime: host) { [weak self] in
+                        self?.queue.async { [weak self] in
+                            guard let self, self.renderGeneration == renderToken else { return }
+                            self.scheduledDuration = max(0, self.scheduledDuration - duration)
+                        }
                     }
                 }
-                lock.unlock()
+                publishHealth(nil, generation: token)
             } catch {
                 logger.error("Audio playback failed: \(error.localizedDescription, privacy: .public)")
-                onError?("Audio unavailable: \(error.localizedDescription)")
+                publishHealth("Audio unavailable: \(error.localizedDescription)", generation: token)
                 retireEngine()
                 return
             }
         }
     }
 
+    private func publishHealth(_ error: String?, generation token: UInt64) {
+        lock.lock()
+        guard generation == token else { lock.unlock(); return }
+        let changed = healthError != error
+        healthError = error
+        lock.unlock()
+        if changed { onStateChange?() }
+    }
+
     private func prepare(sampleRate: Double, channels: Int) throws {
-        if format?.sampleRate == sampleRate, format?.channelCount == AVAudioChannelCount(channels),
-           engine?.isRunning == true { return }
+        if renderSampleRate == sampleRate, renderChannels == channels,
+           renderer?.isRunning == true { return }
         retireEngine()
-        guard let requested = AVAudioFormat(commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false) else {
-            throw NSError(domain: "OMTReceiver.Audio", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format."])
-        }
-        let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: requested)
-        engine.prepare()
-        try engine.start()
-        self.engine = engine; self.player = player; self.format = requested
-        player.play()
+        renderer = try makeRenderer(sampleRate, channels)
+        renderSampleRate = sampleRate; renderChannels = channels
     }
 
     private func retireEngine() {
         renderGeneration &+= 1
-        player?.stop(); engine?.stop()
-        player = nil; engine = nil; format = nil; scheduledDuration = 0
+        renderer?.stop()
+        renderer = nil; renderSampleRate = nil; renderChannels = nil; scheduledDuration = 0
     }
 
     deinit {
@@ -159,6 +150,114 @@ final class AudioPlayer: @unchecked Sendable {
         signal.cancel()
         // No queued closure retains self; queue-owned graph cannot be used after
         // the final reference is released.
-        player?.stop(); engine?.stop()
+        renderer?.stop()
     }
+}
+
+/// Pure PCM backlog policy. Keep the newest bounded window rather than
+/// rejecting valid long chunks or letting one chunk bypass the latency budget.
+struct AudioFrameQueue {
+    static let maximumIncomingDuration = 0.300
+    static let maximumScheduledDuration = 0.350
+    private(set) var frames: [AudioFrame] = []
+    private(set) var duration: Double = 0
+
+    static func normalized(_ frame: AudioFrame) -> (frame: AudioFrame, trimmed: Bool)? {
+        guard frame.sampleRate.isFinite, (8000...384000).contains(frame.sampleRate),
+              (1...32).contains(frame.channels), (1...131072).contains(frame.samplesPerChannel),
+              frame.data.count >= frame.channels * frame.samplesPerChannel * 4 else { return nil }
+        let keptSamples = min(frame.samplesPerChannel, Int(floor(frame.sampleRate * maximumIncomingDuration)))
+        guard keptSamples < frame.samplesPerChannel else { return (frame, false) }
+        let omittedSamples = frame.samplesPerChannel - keptSamples
+        let channelBytes = keptSamples * MemoryLayout<Float>.size
+        var data = Data(count: channelBytes * frame.channels)
+        data.withUnsafeMutableBytes { target in
+            frame.data.withUnsafeBytes { source in
+                for channel in 0..<frame.channels {
+                    memcpy(target.baseAddress!.advanced(by: channel * channelBytes),
+                           source.baseAddress!.advanced(by: (channel * frame.samplesPerChannel + omittedSamples) * MemoryLayout<Float>.size),
+                           channelBytes)
+                }
+            }
+        }
+        let ticks = Int64((Double(omittedSamples) * 10_000_000 / frame.sampleRate).rounded())
+        let (advanced, overflow) = frame.timestamp.addingReportingOverflow(ticks)
+        return (AudioFrame(sampleRate: frame.sampleRate, channels: frame.channels,
+                           samplesPerChannel: keptSamples, timestamp: overflow ? Int64.max : advanced, data: data), true)
+    }
+
+    /// Returns whether old backlog was discarded and scheduled audio must reset.
+    mutating func append(_ frame: AudioFrame) -> Bool {
+        var dropped = false
+        while !frames.isEmpty && (frames.count >= 32 || duration + frame.duration > Self.maximumIncomingDuration) {
+            duration -= frames.removeFirst().duration
+            dropped = true
+        }
+        frames.append(frame); duration += frame.duration
+        return dropped
+    }
+
+    mutating func takeAll() -> [AudioFrame] {
+        let result = frames
+        removeAll()
+        return result
+    }
+    mutating func removeAll() { frames.removeAll(keepingCapacity: true); duration = 0 }
+}
+
+extension AudioFrame {
+    var duration: Double { Double(samplesPerChannel) / sampleRate }
+}
+
+/// Core Audio stays behind a rendering boundary so scheduling and epoch fences
+/// can be verified without depending on a physical audio device.
+protocol AudioRendering: AnyObject {
+    var isRunning: Bool { get }
+    var configurationObject: AnyObject? { get }
+    func setVolume(_ value: Float)
+    func reset()
+    func schedule(_ frame: AudioFrame, hostTime: Double, completion: @escaping @Sendable () -> Void) throws
+    func stop()
+}
+
+private final class CoreAudioRenderer: AudioRendering {
+    private let engine = AVAudioEngine()
+    private let player = AVAudioPlayerNode()
+    private let format: AVAudioFormat
+    var isRunning: Bool { engine.isRunning }
+    var configurationObject: AnyObject? { engine }
+
+    init(sampleRate: Double, channels: Int) throws {
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
+                                        sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false) else {
+            throw NSError(domain: "OMTReceiver.Audio", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format."])
+        }
+        self.format = format
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        engine.prepare()
+        try engine.start()
+        player.play()
+    }
+
+    func setVolume(_ value: Float) { player.volume = value }
+    func reset() { player.stop(); player.play() }
+    func schedule(_ frame: AudioFrame, hostTime: Double, completion: @escaping @Sendable () -> Void) throws {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frame.samplesPerChannel)),
+              let planes = buffer.floatChannelData else {
+            throw NSError(domain: "OMTReceiver.Audio", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot allocate an audio buffer."])
+        }
+        buffer.frameLength = AVAudioFrameCount(frame.samplesPerChannel)
+        frame.data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return }
+            for channel in 0..<frame.channels {
+                memcpy(planes[channel], base.advanced(by: channel * frame.samplesPerChannel * 4), frame.samplesPerChannel * 4)
+            }
+        }
+        let presentation = AVAudioTime(hostTime: AVAudioTime.hostTime(forSeconds: hostTime))
+        player.scheduleBuffer(buffer, at: presentation, options: [], completionCallbackType: .dataPlayedBack) { _ in completion() }
+    }
+    func stop() { player.stop(); engine.stop() }
 }

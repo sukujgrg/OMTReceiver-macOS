@@ -22,7 +22,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var terminating = false
     private var testHost: Bool { ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil || NSClassFromString("XCTestCase") != nil }
     private var activeReceiver: ReceiverWindowController? {
-        receivers.first { $0.owns(NSApp.keyWindow) } ?? receivers.first { $0.owns(NSApp.mainWindow) } ?? receivers.last
+        Self.receiver(keyWindow: NSApp.keyWindow, mainWindow: NSApp.mainWindow, receivers: receivers)
+    }
+    static func receiver(keyWindow: NSWindow?, mainWindow: NSWindow?, receivers: [ReceiverWindowController]) -> ReceiverWindowController? {
+        // Settings and other non-receiver key windows have no implicit media
+        // target. Never mute/disconnect an unrelated window through a fallback.
+        if let keyWindow { return receivers.first { $0.owns(keyWindow) } }
+        return receivers.first { $0.owns(mainWindow) }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -109,6 +115,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     @objc private func reconnect(_ sender: Any?) { activeReceiver?.reconnect(sender) }
     @objc private func disconnect(_ sender: Any?) { activeReceiver?.disconnect(sender) }
     @objc private func toggleSidebar(_ sender: Any?) { activeReceiver?.toggleSidebar(sender) }
+    @objc private func closeWindow(_ sender: Any?) { Self.close(window: NSApp.keyWindow, receivers: receivers, sender: sender) }
+    static func close(window: NSWindow?, receivers: [ReceiverWindowController], sender: Any? = nil) {
+        guard let window else { return }
+        // A borderless output has no standard close button for performClose.
+        // Close its owned presentation while preserving the source browser.
+        if let receiver = receivers.first(where: { $0.owns(window) }), window !== receiver.window {
+            receiver.disconnect(sender)
+        } else { window.performClose(sender) }
+    }
     private func ensureReceiver() -> ReceiverWindowController {
         if let receiver = activeReceiver { return receiver }
         newReceiver(nil)
@@ -125,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         case #selector(toggleMute): menuItem.state = activeReceiver?.muted == true ? .on : .off; return activeReceiver != nil
         case #selector(reconnect), #selector(disconnect): return activeReceiver?.selectedSource != nil
         case #selector(toggleSidebar): return activeReceiver != nil
+        case #selector(closeWindow): return NSApp.keyWindow != nil
         default: return !terminating
         }
     }
@@ -148,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         add("New Receiver Window", #selector(newReceiver), key: "n", to: file)
         add("Connect to Address…", #selector(connectAddress), key: "o", to: file)
         file.addItem(.separator())
-        add("Close Window", #selector(NSWindow.performClose(_:)), key: "w", to: file, responder: true)
+        add("Close Window", #selector(closeWindow), key: "w", to: file)
         let edit = submenu("Edit", in: bar)
         add("Undo", Selector(("undo:")), key: "z", to: edit, responder: true)
         add("Redo", Selector(("redo:")), key: "z", modifiers: [.command, .shift], to: edit, responder: true)

@@ -3,7 +3,8 @@ import AppKit
 /// NSWindow's explicit-screen initializer interprets contentRect in that
 /// screen's coordinates. Passing screen.frame would add its origin twice.
 final class PresentationWindow: NSWindow {
-    convenience init(on screen: NSScreen) {
+    enum Role { case viewer, projection }
+    convenience init(on screen: NSScreen, role: Role = .projection) {
         self.init(contentRect: DisplayCatalog.screenRelativeContentRect(for: screen.frame),
                    styleMask: .borderless, backing: .buffered, defer: false, screen: screen)
         isReleasedWhenClosed = false
@@ -11,10 +12,10 @@ final class PresentationWindow: NSWindow {
         backgroundColor = .black
         isOpaque = true
         hasShadow = false
-        // Match the native projection window used by eucaly. The selected
-        // display can contain another application's fullscreen Space.
-        level = .screenSaver
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // External projection must survive switching control apps/Spaces.
+        // Same-screen viewing must yield normally when another app activates.
+        level = role == .projection ? .screenSaver : .normal
+        collectionBehavior = role == .projection ? [.canJoinAllSpaces, .fullScreenAuxiliary] : [.fullScreenNone]
     }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -23,27 +24,44 @@ final class PresentationWindow: NSWindow {
 /// Owns a dedicated native borderless window, preserving the receiver's normal geometry.
 @MainActor
 final class FullscreenController: NSObject, NSWindowDelegate {
-    private static var activeOwners = Set<ObjectIdentifier>()
+    private final class Owner {
+        weak var controller: FullscreenController?
+        init(_ controller: FullscreenController) { self.controller = controller }
+    }
+    // A physical display has one output owner. Replacing it retires the old
+    // controller through its ordinary exit notification, including its audio.
+    private static var owners: [String: Owner] = [:]
     private static var originalPresentationOptions: NSApplication.PresentationOptions = []
     private weak var owner: NSWindow?
     private weak var home: NSView?
     private let video: VideoView
     private let screens: () -> [NSScreen]
+    private let safeAreaInsets: (NSScreen) -> NSEdgeInsets
+    private let keyWindow: @MainActor () -> NSWindow?
     private let keepOwnerVisible: Bool
     var restoreOwnerFocus: (() -> Void)?
     private var presentation: PresentationWindow?
+    private var surfaceConstraints: [NSLayoutConstraint] = []
+    private enum Intent { case output, controls }
+    private var intent = Intent.output
     private var targetID = ""
     private var requestedDisplayID = ""
     private var originalExcludedFromWindowsMenu = false
     private var displayObserver: NSObjectProtocol?
     private var preferenceObserver: NSObjectProtocol?
+    private var ownerScreenObserver: NSObjectProtocol?
     var isFullscreen: Bool { presentation != nil }
     private(set) var isRetargeting = false
     var onChange: (() -> Void)?
 
-    init(owner: NSWindow, home: NSView, video: VideoView, keepOwnerVisible: Bool = false, screens: @escaping () -> [NSScreen] = { NSScreen.screens }) {
-        self.owner = owner; self.home = home; self.video = video; self.keepOwnerVisible = keepOwnerVisible; self.screens = screens
+    init(owner: NSWindow, home: NSView, video: VideoView, keepOwnerVisible: Bool = false, screens: @escaping () -> [NSScreen] = { NSScreen.screens },
+         safeAreaInsets: @escaping (NSScreen) -> NSEdgeInsets = { $0.safeAreaInsets },
+         keyWindow: @escaping @MainActor () -> NSWindow? = { NSApp.keyWindow }) {
+        self.owner = owner; self.home = home; self.video = video; self.keepOwnerVisible = keepOwnerVisible; self.screens = screens; self.safeAreaInsets = safeAreaInsets; self.keyWindow = keyWindow
         super.init()
+        ownerScreenObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: owner, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { if let self, let window = self.presentation { self.applyPolicy(to: window) } }
+        }
         displayObserver = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.screensChanged() }
         }
@@ -53,54 +71,84 @@ final class FullscreenController: NSObject, NSWindowDelegate {
     }
     func owns(_ window: NSWindow) -> Bool { presentation === window }
     func toggle() { isFullscreen ? exit() : enter() }
-    func enter() {
-        guard presentation == nil, let screen = DisplayCatalog.target(identifier: Preferences.shared.fullscreenDisplayID, screens: screens()) else { return }
+    func enter(preservingControls controls: NSWindow? = nil) {
+        if let presentation { present(presentation, preservingControls: controls); return }
+        guard let screen = DisplayCatalog.target(identifier: Preferences.shared.fullscreenDisplayID, screens: screens()) else { return }
         requestedDisplayID = Preferences.shared.fullscreenDisplayID
         targetID = DisplayCatalog.identifier(for: screen)
+        Self.owners = Self.owners.filter { $0.value.controller?.isFullscreen == true }
+        Self.owners[targetID]?.controller?.exit(showOwner: false)
         // The window must already belong to the target screen when MetalKit's
         // viewDidMoveToWindow runs; correcting an offscreen frame afterward is
         // too late for the view's initial display-link/drawable association.
-        let window = PresentationWindow(on: screen)
+        let isExternal = owner?.screen.map(DisplayCatalog.identifier) != targetID
+        let window = PresentationWindow(on: screen, role: isExternal ? .projection : .viewer)
         window.title = owner?.title ?? "OMTReceiver"
         window.delegate = self
         let host = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
         window.contentView = host
         video.removeFromSuperview()
-        pin(video, to: host)
+        pin(video, to: host, insets: safeAreaInsets(screen))
         host.layoutSubtreeIfNeeded()
         presentation = window
         originalExcludedFromWindowsMenu = owner?.isExcludedFromWindowsMenu ?? false
         owner?.isExcludedFromWindowsMenu = keepOwnerVisible ? originalExcludedFromWindowsMenu : true
-        if Self.activeOwners.isEmpty { Self.originalPresentationOptions = NSApp.presentationOptions }
-        Self.activeOwners.insert(ObjectIdentifier(self))
+        if Self.owners.isEmpty { Self.originalPresentationOptions = NSApp.presentationOptions }
+        Self.owners[targetID] = Owner(self)
         var options = Self.originalPresentationOptions
         options.subtract([.hideDock, .hideMenuBar, .autoHideDock, .autoHideMenuBar])
         options.formUnion([.autoHideDock, .autoHideMenuBar])
         NSApp.presentationOptions = options
         window.setFrame(screen.frame, display: true)
-        if keepOwnerVisible, let ownerScreen = owner?.screen,
-           DisplayCatalog.identifier(for: ownerScreen) != targetID {
-            // Keep the source grid usable on the controls display while output
-            // fills another display. Clicking the output can still make it key.
-            window.orderFront(nil)
-        } else {
-            window.makeKeyAndOrderFront(nil)
-            window.makeFirstResponder(video)
-        }
+        present(window, preservingControls: controls)
         if !keepOwnerVisible { owner?.orderOut(nil) }
         onChange?()
     }
+    private func present(_ window: PresentationWindow, preservingControls controls: NSWindow?) {
+        intent = controls?.screen.map(DisplayCatalog.identifier) == targetID ? .controls : .output
+        applyPolicy(to: window)
+        if intent == .controls, let controls {
+            window.order(.below, relativeTo: controls.windowNumber)
+            controls.makeKeyAndOrderFront(nil)
+            return
+        }
+        let isExternal = intent == .output && owner?.screen.map(DisplayCatalog.identifier) != targetID
+        if keepOwnerVisible && isExternal { window.orderFront(nil) }
+        else {
+            window.makeKeyAndOrderFront(nil)
+            window.makeFirstResponder(video)
+        }
+    }
+    private func applyPolicy(to window: PresentationWindow) {
+        let isExternal = intent == .output && owner?.screen.map(DisplayCatalog.identifier) != targetID
+        window.level = isExternal ? .screenSaver : .normal
+        window.collectionBehavior = isExternal ? [.canJoinAllSpaces, .fullScreenAuxiliary] : [.fullScreenNone]
+    }
+    /// Native dialogs change window order, never receiver lifetime. Returning
+    /// to a thumbnail raises this same output with its picture/audio intact.
+    func showControls() {
+        guard let owner else { return }
+        intent = .controls
+        if let presentation {
+            applyPolicy(to: presentation)
+            presentation.order(.below, relativeTo: owner.windowNumber)
+        }
+        owner.makeKeyAndOrderFront(nil)
+        restoreOwnerFocus?()
+    }
+    func updateTitle(_ title: String) { presentation?.title = title }
     func exit(showOwner: Bool = true) {
         guard let window = presentation else { return }
         presentation = nil
+        intent = .output
         window.delegate = nil
         video.removeFromSuperview()
         if let home { pin(video, to: home); home.layoutSubtreeIfNeeded() }
         window.orderOut(nil)
         window.close()
         owner?.isExcludedFromWindowsMenu = originalExcludedFromWindowsMenu
-        Self.activeOwners.remove(ObjectIdentifier(self))
-        if Self.activeOwners.isEmpty { NSApp.presentationOptions = Self.originalPresentationOptions }
+        if Self.owners[targetID]?.controller === self { Self.owners.removeValue(forKey: targetID) }
+        if Self.owners.isEmpty { NSApp.presentationOptions = Self.originalPresentationOptions }
         if showOwner {
             owner?.makeKeyAndOrderFront(nil)
             if let restoreOwnerFocus { restoreOwnerFocus() }
@@ -116,24 +164,32 @@ final class FullscreenController: NSObject, NSWindowDelegate {
             exit(); return
         }
         window.setFrame(screen.frame, display: true)
+        if let host = window.contentView { pin(video, to: host, insets: safeAreaInsets(screen)) }
         window.contentView?.layoutSubtreeIfNeeded()
     }
     private func preferenceChanged() {
         guard presentation != nil, requestedDisplayID != Preferences.shared.fullscreenDisplayID else { return }
+        let controls = keyWindow().flatMap { $0 === presentation ? nil : $0 }
         // Retargeting is a view transfer, not a user stop command.
         isRetargeting = true
         exit(showOwner: false)
-        enter()
+        enter(preservingControls: controls)
         isRetargeting = false
         if presentation == nil { onChange?() }
     }
-    private func pin(_ view: NSView, to parent: NSView) {
+    private func pin(_ view: NSView, to parent: NSView, insets: NSEdgeInsets = NSEdgeInsets()) {
+        NSLayoutConstraint.deactivate(surfaceConstraints)
         view.translatesAutoresizingMaskIntoConstraints = false
         parent.addSubview(view)
-        NSLayoutConstraint.activate([view.leadingAnchor.constraint(equalTo: parent.leadingAnchor), view.trailingAnchor.constraint(equalTo: parent.trailingAnchor), view.topAnchor.constraint(equalTo: parent.topAnchor), view.bottomAnchor.constraint(equalTo: parent.bottomAnchor)])
+        surfaceConstraints = [view.leadingAnchor.constraint(equalTo: parent.leadingAnchor, constant: insets.left),
+            view.trailingAnchor.constraint(equalTo: parent.trailingAnchor, constant: -insets.right),
+            view.topAnchor.constraint(equalTo: parent.topAnchor, constant: insets.top),
+            view.bottomAnchor.constraint(equalTo: parent.bottomAnchor, constant: -insets.bottom)]
+        NSLayoutConstraint.activate(surfaceConstraints)
     }
     deinit {
         if let displayObserver { NotificationCenter.default.removeObserver(displayObserver) }
         if let preferenceObserver { NotificationCenter.default.removeObserver(preferenceObserver) }
+        if let ownerScreenObserver { NotificationCenter.default.removeObserver(ownerScreenObserver) }
     }
 }

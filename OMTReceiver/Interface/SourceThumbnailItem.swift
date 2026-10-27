@@ -15,7 +15,7 @@ final class SourceThumbnailItem: NSCollectionViewItem {
 }
 
 @MainActor
-final class SourceThumbnailCard: NSView {
+final class SourceThumbnailCard: NSButton {
     var onActivate: (() -> Void)?
     var isSelected = false { didSet { if oldValue != isSelected { updateAppearance() } } }
     private let previewHost = NSView()
@@ -27,6 +27,17 @@ final class SourceThumbnailCard: NSView {
 
     init() {
         super.init(frame: .zero)
+        // AppKit owns press tracking: release inside commits, dragging outside
+        // cancels, and subsequent clicks of a double click are ignored.
+        setButtonType(.momentaryPushIn)
+        title = ""
+        isBordered = false
+        isTransparent = true
+        ignoresMultiClick = true
+        isContinuous = false
+        sendAction(on: .leftMouseUp)
+        target = self
+        action = #selector(activateSource)
         wantsLayer = true
         layer?.cornerRadius = 8; layer?.borderWidth = 1; layer?.masksToBounds = true
         previewHost.wantsLayer = true
@@ -73,6 +84,9 @@ final class SourceThumbnailCard: NSView {
         updateAppearance()
     }
     required init?(coder: NSCoder) { fatalError("Use init()") }
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
 
     func configure(source: OMTSource, status state: String, format: String,
                    isPlaying: Bool, preview surface: NSView?) {
@@ -83,7 +97,11 @@ final class SourceThumbnailCard: NSView {
         if playing.isHidden == isPlaying { playing.isHidden = !isPlaying }
         toolTip = "\(source.name)\n\(source.address)\n\(description)"
         setAccessibilityLabel(source.name)
-        setAccessibilityValue((isPlaying ? "Playing fullscreen. " : "") + description)
+        let value = (isPlaying ? "Playing fullscreen. " : "") + description
+        if accessibilityValue() as? String != value {
+            setAccessibilityValue(value)
+            NSAccessibility.post(element: self, notification: .valueChanged)
+        }
         if let surface {
             if let existing = preview, existing !== surface { detachPreview() }
             if surface.superview !== previewHost {
@@ -111,14 +129,7 @@ final class SourceThumbnailCard: NSView {
         guard super.hitTest(point) != nil else { return nil }
         return self
     }
-    override func mouseDown(with event: NSEvent) {
-        guard event.clickCount == 1 else { return }
-        onActivate?()
-    }
-    override func accessibilityPerformPress() -> Bool {
-        guard let onActivate else { return false }
-        onActivate(); return true
-    }
+    @objc private func activateSource(_ sender: Any?) { onActivate?() }
     override func resetCursorRects() { super.resetCursorRects(); addCursorRect(bounds, cursor: .pointingHand) }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); updateAppearance() }
     private func updateAppearance() {

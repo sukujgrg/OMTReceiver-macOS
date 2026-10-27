@@ -70,6 +70,9 @@ float4 pixel(device const uchar* bytes, constant Uniforms& u, int x, int y) {
 float luma(float4 p) { return dot(p.rgb,float3(.2126f,.7152f,.0722f)); }
 float4 fieldPixel(device const uchar* bytes,constant Uniforms& u,int x,int y) {
     int field=u.options.z;
+    // Scaling reaches half a texel beyond the frame at its edges. Clamp the
+    // source row before testing parity so edge replication stays in this field.
+    y=clamp(y,0,int(u.dimensions.y)-1);
     if (field<0 || (y&1)==field) return pixel(bytes,u,x,y);
     // Low-latency edge-directed spatial interpolation. Never mix moments from
     // opposite fields; there is no future-frame history or added lookahead.

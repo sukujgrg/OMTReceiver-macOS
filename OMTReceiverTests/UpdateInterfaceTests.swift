@@ -71,6 +71,8 @@ final class UpdateInterfaceTests: XCTestCase {
         defer { settings.window?.close() }
         let window = try XCTUnwrap(settings.window), content = try XCTUnwrap(window.contentView)
         let controls = descendants(content)
+        XCTAssertEqual(Set(controls.compactMap { ($0 as? NSPopUpButton)?.accessibilityLabel() }),
+                       ["Default fullscreen display", "Interlaced video", "Field order", "Alpha background"])
         let checkbox = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "Automatically Check for Updates" })
         let check = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "Check for Updates…" })
         XCTAssertEqual(checkbox.state, .off)
@@ -94,7 +96,7 @@ final class UpdateInterfaceTests: XCTestCase {
         XCTAssertTrue(descendants(content).compactMap { $0 as? NSTextField }.contains { $0.stringValue.contains("signing configuration is missing") })
     }
 
-    func testExplicitDialogsRevealStackedReceiversOnTheInvokingDisplay() async throws {
+    func testDisplayOwnershipReplacementAndExplicitDialogsRevealControls() async throws {
         try XCTSkipIf(NSScreen.screens.isEmpty, "A native display is required")
         let driver = InterfaceUpdateDriver()
         let updates = AppUpdateViewModel(driver: driver); updates.start()
@@ -105,27 +107,41 @@ final class UpdateInterfaceTests: XCTestCase {
         let settings = PreferencesWindowController(discovery: OMTDiscoveryManager(), updates: updates)
         defer { settings.window?.close() }
         AppDelegate.revealControls(for: settings.window, receivers: [first, second])
-        XCTAssertTrue(first.isFullscreen); XCTAssertTrue(second.isFullscreen)
+        XCTAssertFalse(first.isFullscreen)
+        XCTAssertNil(first.selectedSource, "Displaced video/audio reception must stop")
+        XCTAssertTrue(second.isFullscreen)
         driver.state.availableVersion = "1.1"
-        XCTAssertTrue(first.isFullscreen); XCTAssertTrue(second.isFullscreen)
+        XCTAssertFalse(first.isFullscreen)
+        XCTAssertNil(first.selectedSource, "Displaced video/audio reception must stop")
+        XCTAssertTrue(second.isFullscreen)
         XCTAssertEqual(driver.checks, 0)
-        let presentation = try XCTUnwrap(NSApp.windows.first { first.owns($0) && $0 !== first.window })
-        XCTAssertEqual(first.fullscreenDisplayID, second.fullscreenDisplayID)
-        let owner = try XCTUnwrap(first.window)
+        let presentation = try XCTUnwrap(NSApp.windows.first { second.owns($0) && $0 !== second.window })
+        let owner = try XCTUnwrap(second.window)
         let video = try XCTUnwrap(descendants(presentation.contentView!).compactMap { $0 as? VideoView }.first)
         // The app-unit host cannot force WindowServer foreground activation.
         // Supply the resolver's explicit key-window dependency and verify local
         // window/responder ownership; native foreground focus is a separate check.
         AppDelegate.revealControls(for: presentation, receivers: [first, second])
         XCTAssertFalse(first.isFullscreen)
-        XCTAssertFalse(second.isFullscreen, "A stacked receiver must not obscure the native update dialog")
+        XCTAssertTrue(second.isFullscreen, "Revealing controls must preserve the output session")
+        XCTAssertEqual(second.selectedSource, .testPattern)
+        XCTAssertEqual(presentation.level, .normal, "Native dialogs must be able to cover output on their display")
         XCTAssertTrue(owner.isVisible)
-        XCTAssertTrue(owner.firstResponder === first.sourceBrowser.collectionView)
-        XCTAssertTrue(video.window === owner)
+        XCTAssertTrue(owner.firstResponder === second.sourceBrowser.collectionView)
+        XCTAssertTrue(video.window === presentation)
+        second.sourceBrowser.onActivate?(.testPattern)
+        XCTAssertTrue(second.owns(presentation), "Returning from controls reuses the same output")
         let item = try XCTUnwrap(badge(first))
         let action = try XCTUnwrap(item.action)
         XCTAssertTrue(NSApp.sendAction(action, to: item.target, from: item))
         XCTAssertEqual(driver.checks, 1)
+        first.sourceBrowser.onActivate?(.testPattern)
+        second.sourceBrowser.onActivate?(.testPattern)
+        first.sourceBrowser.onActivate?(.testPattern)
+        XCTAssertTrue(first.isFullscreen, "The most recently activated source must own the display")
+        XCTAssertEqual(first.selectedSource, .testPattern)
+        XCTAssertFalse(second.isFullscreen)
+        XCTAssertNil(second.selectedSource, "The replaced receiver cannot retain hidden audio")
         await retire([first, second])
     }
 
@@ -136,25 +152,28 @@ final class UpdateInterfaceTests: XCTestCase {
         let saved = Preferences.shared.fullscreenDisplayID
         Preferences.shared.fullscreenDisplayID = ""
         defer { Preferences.shared.fullscreenDisplayID = saved }
-        let first = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 925)
-        let second = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 926)
+        let main = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let first = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 925, screens: { [main] })
+        let second = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 926, screens: { [external] })
+        for controller in [first, second] {
+            controller.window?.setFrameOrigin(NSPoint(x: main.visibleFrame.minX + 40, y: main.visibleFrame.minY + 40))
+        }
         first.toggleFullscreen(nil); second.toggleFullscreen(nil)
         defer { first.revealControlsForDialog(); second.revealControlsForDialog() }
         let firstPresentation = try XCTUnwrap(NSApp.windows.first { first.owns($0) && $0 !== first.window })
         let secondPresentation = try XCTUnwrap(NSApp.windows.first { second.owns($0) && $0 !== second.window })
-        // Grouping follows the actual windows even if a display or window move
-        // has changed their location since the saved default was chosen.
-        secondPresentation.setFrame(external.frame, display: true)
+        XCTAssertEqual(secondPresentation.level, .screenSaver, "External projection keeps its dedicated display policy")
         XCTAssertNotEqual(first.fullscreenDisplayID, second.fullscreenDisplayID)
         let owner = try XCTUnwrap(first.window)
         let video = try XCTUnwrap(descendants(firstPresentation.contentView!).compactMap { $0 as? VideoView }.first)
         // Key-window input is injected because this component test does not own
         // OS foreground activation. Check the actual view and responder transfer.
         AppDelegate.revealControls(for: firstPresentation, receivers: [first, second])
-        XCTAssertFalse(first.isFullscreen)
+        XCTAssertTrue(first.isFullscreen)
+        XCTAssertEqual(first.selectedSource, .testPattern)
         XCTAssertTrue(owner.isVisible)
         XCTAssertTrue(owner.firstResponder === first.sourceBrowser.collectionView)
-        XCTAssertTrue(video.window === owner)
+        XCTAssertTrue(video.window === firstPresentation)
         XCTAssertTrue(second.isFullscreen)
         XCTAssertEqual(second.fullscreenDisplayID, DisplayCatalog.identifier(for: external))
         await retire([first, second])

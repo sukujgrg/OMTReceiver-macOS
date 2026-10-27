@@ -14,6 +14,7 @@ private extension NSToolbarItem.Identifier {
 final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSToolbarItemValidation {
     private let discovery: OMTDiscoveryManager
     private let updates: AppUpdateViewModel?
+    private let screens: () -> [NSScreen]
     private let clock: PlaybackClock
     private let video: VideoView
     private let audio: AudioPlayer
@@ -42,8 +43,9 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
     var selectedSource: OMTSource? { session.source }
 
-    init(discovery: OMTDiscoveryManager, number: Int, updates: AppUpdateViewModel? = nil) {
-        self.discovery = discovery; self.updates = updates
+    init(discovery: OMTDiscoveryManager, number: Int, updates: AppUpdateViewModel? = nil,
+         screens: @escaping () -> [NSScreen] = { NSScreen.screens }) {
+        self.discovery = discovery; self.updates = updates; self.screens = screens
         let clock = PlaybackClock(); self.clock = clock
         video = VideoView(frame: .zero, clock: clock)
         video.isPaused = true
@@ -59,7 +61,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         window.setFrameAutosaveName("ReceiverWindow\(number)")
         if number == 1 { window.center() } else { window.cascadeTopLeft(from: NSPoint(x: 100 + number * 22, y: 800 - number * 22)) }
         build()
-        fullscreen = FullscreenController(owner: window, home: pictureHost, video: video, keepOwnerVisible: true)
+        fullscreen = FullscreenController(owner: window, home: pictureHost, video: video, keepOwnerVisible: true, screens: screens)
         fullscreen.restoreOwnerFocus = { [weak self] in self?.sourceBrowser.focusSelectedSource() }
         fullscreen.onChange = { [weak self] in self?.fullscreenChanged() }
         // Source cards are the activation surface. Clicking the output picture
@@ -67,10 +69,16 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         video.onToggleFullscreen = nil
         video.setAccessibilityHelp("Fullscreen output. Press Escape to return to sources.")
         video.onEscape = { [weak self] in self?.fullscreen.exit() }
-        video.onError = { [weak self] message in self?.videoError = message; self?.updateState() }
+        video.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.videoError = self.video.errorMessage; self.updateState()
+        }
         videoError = video.errorMessage
-        audio.onError = { [weak self] message in
-            Task { @MainActor [weak self] in self?.audioError = message; self?.updateState() }
+        audio.onStateChange = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.audioError = self.audio.errorMessage; self.updateState()
+            }
         }
         sourceBrowser.onActivate = { [weak self] source in self?.connect(source) }
         sourceBrowser.onConnectAddress = { [weak self] in self?.connectAddress(nil) }
@@ -140,7 +148,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     /// Activating the same tile again leaves the existing output in place.
     func connect(_ source: OMTSource) {
         guard !closed else { return }
-        guard DisplayCatalog.target(identifier: Preferences.shared.fullscreenDisplayID) != nil else {
+        guard DisplayCatalog.target(identifier: Preferences.shared.fullscreenDisplayID, screens: screens()) != nil else {
             status.stringValue = "Connect a display to open fullscreen output."
             return
         }
@@ -169,6 +177,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
     private func updateState() {
         guard !closed else { return }
         window?.title = session.source.map { "OMTReceiver — \($0.name)" } ?? "OMTReceiver"
+        if let title = window?.title { fullscreen?.updateTitle(title) }
         let errors = [videoError.map { "Video: \($0)" }, audioError.map { "Audio: \($0)" }].compactMap { $0 }
         status.stringValue = session.source.map { "\($0.name) · \(session.statusText)" } ?? "Sources"
         if !errors.isEmpty { status.stringValue += " · " + errors.joined(separator: " · ") }
@@ -212,7 +221,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         return true
     }
     func revealControlsForDialog() {
-        if isFullscreen { fullscreen.exit() }
+        fullscreen.showControls()
         window?.makeKeyAndOrderFront(nil)
         sourceBrowser.focusSelectedSource()
     }
@@ -221,7 +230,7 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         if let onCheckForUpdates { onCheckForUpdates(window); return }
         // A browser on a different screen can show native update UI while the
         // external display continues receiving its selected source.
-        if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.exit() }
+        if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.showControls() }
         window?.makeKeyAndOrderFront(nil)
         updates?.checkForUpdates()
     }
@@ -240,14 +249,14 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         else { session.disconnect(); audio.stop(); video.clear(); video.isPaused = true; refreshDiscovery(); updateState() }
     }
     @objc func toggleSidebar(_ sender: Any?) {
-        if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.exit() }
+        if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.showControls() }
         window?.makeKeyAndOrderFront(nil); sourceBrowser.focusSelectedSource()
     }
     @objc func showTestPattern(_ sender: Any?) { connect(.testPattern) }
     @objc func connectAddress(_ sender: Any?) {
         guard let window else { return }
         if let onRevealControls { onRevealControls(window) }
-        else if fullscreenDisplayID == window.screen.map(DisplayCatalog.identifier) { fullscreen.exit() }
+        else if fullscreenDisplayID == window.screen.map(DisplayCatalog.identifier) { fullscreen.showControls() }
         window.makeKeyAndOrderFront(nil)
         let alert = NSAlert(); alert.messageText = "Connect to OMT Source"; alert.informativeText = "Enter the sender’s address and TCP port."
         alert.addButton(withTitle: "Connect"); alert.addButton(withTitle: "Cancel")

@@ -146,7 +146,7 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
             collection.selectionIndexPaths.sorted().first ??
             (sources.isEmpty ? nil : IndexPath(item: 0, section: 0))
         if let target {
-            collection.selectItems(at: [target], scrollPosition: .nearestHorizontalEdge)
+            collection.selectionIndexPaths = [target]
             collection.scrollToItems(at: [target], scrollPosition: .nearestVerticalEdge)
         }
         view.window?.makeFirstResponder(collection)
@@ -175,7 +175,7 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
         snapshot.reloadItems(changed)
         dataSource.apply(snapshot, animatingDifferences: false)
         let selectedPaths = Set(selectedIDs.compactMap { dataSource.indexPath(for: $0) })
-        if !selectedPaths.isEmpty { collection.selectItems(at: selectedPaths, scrollPosition: []) }
+        collection.selectionIndexPaths = selectedPaths
         scheduleVisibleRefresh()
     }
 
@@ -246,6 +246,13 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
         else { state = "Starting preview…" }
         item.card.configure(source: source, status: state, format: preview?.formatText ?? "",
                             isPlaying: source.id == playingID, preview: preview?.view)
+        let menu = NSMenu(title: source.name)
+        menu.autoenablesItems = false
+        let retry = NSMenuItem(title: "Retry Preview", action: #selector(retryPreview(_:)), keyEquivalent: "")
+        retry.target = self; retry.representedObject = source.id
+        retry.isEnabled = previews.canRetry(sourceID: source.id)
+        menu.addItem(retry)
+        item.card.menu = menu
     }
 
     private func renderStatus() {
@@ -263,9 +270,14 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
     }
     private func activate(sourceID: String) {
         guard !stopped, let source = sourceByID[sourceID] else { return }
-        if let path = dataSource.indexPath(for: sourceID) { collection.selectItems(at: [path], scrollPosition: []) }
+        if let path = dataSource.indexPath(for: sourceID) { collection.selectionIndexPaths = [path] }
         view.window?.makeFirstResponder(collection)
         onActivate?(source)
+    }
+    @objc private func retryPreview(_ item: NSMenuItem) {
+        guard !stopped, let id = item.representedObject as? String else { return }
+        previews.retry(sourceID: id)
+        renderVisibleItems()
     }
     @objc private func connectAddress() { onConnectAddress?() }
 

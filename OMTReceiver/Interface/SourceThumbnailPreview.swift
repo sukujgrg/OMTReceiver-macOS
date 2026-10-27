@@ -8,9 +8,16 @@ protocol SourceThumbnailPreviewing: AnyObject {
     var view: NSView { get }
     var statusText: String { get }
     var formatText: String { get }
+    var canRetry: Bool { get }
     var onChange: (() -> Void)? { get set }
     func start()
+    func retry()
     func stop(completion: @escaping @MainActor @Sendable () -> Void)
+}
+
+extension SourceThumbnailPreviewing {
+    var canRetry: Bool { false }
+    func retry() {}
 }
 
 @MainActor
@@ -27,6 +34,7 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
 
     var statusText: String { rendererError ?? session.statusText }
     var formatText: String { session.formatText }
+    var canRetry: Bool { started && !stopped && session.isTerminalFailure }
 
     init(source: OMTSource) {
         self.source = source
@@ -39,9 +47,10 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
         video.onEscape = nil
         session = ReceiverSession(video: { [video] in video.enqueue($0) }, audio: { _ in }, mode: .preview)
         rendererError = video.errorMessage
-        video.onError = { [weak self] message in
-            self?.rendererError = message
-            self?.onChange?()
+        video.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.rendererError = self.video.errorMessage
+            self.onChange?()
         }
         session.onChange = { [weak self] in self?.onChange?() }
         preferenceObserver = NotificationCenter.default.addObserver(
@@ -65,6 +74,14 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
             video.clear()
             completion()
         }
+    }
+
+    /// A deliberate retry uses the session's serial worker: its old SDK
+    /// instance is fully destroyed before another instance can be created.
+    func retry() {
+        guard canRetry else { return }
+        video.clear()
+        session.reconnect()
     }
 
     private func applyPreferences() {
@@ -105,6 +122,11 @@ final class SourcePreviewCoordinator {
     var visibleSourceCount: Int { desired.count }
     var pausedVisibleCount: Int { max(0, desired.count - active.count) }
     func preview(for sourceID: String) -> (any SourceThumbnailPreviewing)? { active[sourceID] }
+    func canRetry(sourceID: String) -> Bool { !stopping && active[sourceID]?.canRetry == true }
+    func retry(sourceID: String) {
+        guard canRetry(sourceID: sourceID) else { return }
+        active[sourceID]?.retry()
+    }
 
     func setVisibleSources(_ sources: [OMTSource]) {
         guard !stopping else { return }

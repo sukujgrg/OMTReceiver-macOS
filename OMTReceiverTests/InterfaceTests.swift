@@ -12,17 +12,19 @@ final class InterfaceTests: XCTestCase {
         XCTAssertNil(first.selectedSource)
         XCTAssertNil(second.selectedSource)
         first.connect(.testPattern)
-        second.connect(.testPattern)
         first.toggleMute(nil)
         XCTAssertTrue(first.muted)
         XCTAssertFalse(second.muted)
         let manual = try OMTSource.manual("omt://127.0.0.1:1")
         first.connect(manual)
         XCTAssertEqual(first.selectedSource, manual)
-        XCTAssertEqual(second.selectedSource, .testPattern)
+        XCTAssertNil(second.selectedSource)
         first.disconnect(nil)
         XCTAssertNil(first.selectedSource)
+        second.connect(.testPattern)
         XCTAssertEqual(second.selectedSource, .testPattern)
+        XCTAssertTrue(first.muted)
+        XCTAssertFalse(second.muted)
         let stopped = expectation(description: "Both receiver workers retired")
         stopped.expectedFulfillmentCount = 2
         first.shutdown { stopped.fulfill() }
@@ -202,6 +204,161 @@ final class InterfaceTests: XCTestCase {
         receiver.shutdown { stopped.fulfill() }
         await fulfillment(of: [stopped], timeout: 8)
         receiver.window?.close()
+    }
+
+    @MainActor
+    func testSingleDisplayFallbackViewingSourceSwitchAndEscape() async throws {
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let saved = Preferences.shared.fullscreenDisplayID
+        Preferences.shared.fullscreenDisplayID = "disconnected-external-display"
+        defer { Preferences.shared.fullscreenDisplayID = saved }
+        // Deliberately expose exactly one screen, even on a multi-display Mac.
+        let receiver = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 806,
+                                                screens: { [screen] })
+        let owner = try XCTUnwrap(receiver.window)
+        owner.setFrameOrigin(NSPoint(x: screen.visibleFrame.minX + 40, y: screen.visibleFrame.minY + 40))
+        receiver.showWindow(nil)
+        receiver.sourceBrowser.onActivate?(.testPattern)
+        let output = try XCTUnwrap(NSApp.windows.first { receiver.owns($0) && $0 !== owner })
+        XCTAssertEqual(output.frame, screen.frame)
+        XCTAssertEqual(output.level, .normal, "Same-screen viewing must yield to other apps")
+        XCTAssertFalse(output.collectionBehavior.contains(.canJoinAllSpaces))
+        XCTAssertTrue(output.firstResponder is VideoView)
+        let replacement = try OMTSource.manual("omt://127.0.0.1:1")
+        receiver.sourceBrowser.onActivate?(replacement)
+        XCTAssertEqual(receiver.selectedSource, replacement)
+        XCTAssertTrue(receiver.owns(output), "Source switching retains the output window")
+        receiver.sourceBrowser.onEscape?()
+        XCTAssertNil(receiver.selectedSource)
+        XCTAssertFalse(receiver.isFullscreen)
+        XCTAssertTrue(owner.firstResponder === receiver.sourceBrowser.collectionView)
+        receiver.sourceBrowser.onActivate?(.testPattern)
+        let current = try XCTUnwrap(NSApp.windows.first { receiver.owns($0) && $0 !== owner })
+        AppDelegate.revealControls(for: current, receivers: [receiver])
+        XCTAssertTrue(receiver.isFullscreen, "Native controls preserve playback on the only screen")
+        XCTAssertEqual(receiver.selectedSource, .testPattern)
+        XCTAssertTrue(owner.firstResponder === receiver.sourceBrowser.collectionView)
+        receiver.sourceBrowser.onActivate?(.testPattern)
+        XCTAssertTrue(receiver.owns(current))
+        AppDelegate.close(window: current, receivers: [receiver])
+        XCTAssertFalse(receiver.isFullscreen, "Close Window targets the borderless output, not its browser")
+        XCTAssertTrue(owner.isVisible)
+        XCTAssertNil(receiver.selectedSource)
+        receiver.sourceBrowser.onActivate?(.testPattern)
+        receiver.sourceBrowser.onEscape?()
+        XCTAssertFalse(receiver.isFullscreen)
+        XCTAssertNil(receiver.selectedSource)
+        let stopped = expectation(description: "Single-screen receiver retired")
+        receiver.shutdown { stopped.fulfill() }
+        await fulfillment(of: [stopped], timeout: 5)
+        owner.close()
+    }
+
+    @MainActor
+    func testCustomFullscreenFitsVideoInsideCameraHousingSafeArea() throws {
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let saved = Preferences.shared.fullscreenDisplayID
+        Preferences.shared.fullscreenDisplayID = ""
+        defer { Preferences.shared.fullscreenDisplayID = saved }
+        let owner = NSWindow(contentRect: NSRect(x: screen.frame.minX + 40, y: screen.frame.minY + 40, width: 640, height: 360),
+                             styleMask: [.titled], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false
+        let home = try XCTUnwrap(owner.contentView)
+        let video = VideoView(frame: home.bounds); home.addSubview(video)
+        let controller = FullscreenController(owner: owner, home: home, video: video, screens: { [screen] },
+            safeAreaInsets: { _ in NSEdgeInsets(top: 32, left: 8, bottom: 12, right: 10) })
+        defer { controller.exit(showOwner: false); owner.close() }
+        controller.enter()
+        XCTAssertEqual(video.frame.minX, 8, accuracy: 0.1)
+        XCTAssertEqual(video.frame.minY, 12, accuracy: 0.1)
+        XCTAssertEqual(video.frame.width, screen.frame.width - 18, accuracy: 0.1)
+        XCTAssertEqual(video.frame.height, screen.frame.height - 44, accuracy: 0.1)
+        XCTAssertEqual(video.window?.frame, screen.frame, "The black background still covers the whole screen")
+    }
+
+    @MainActor
+    func testMediaCommandContextDoesNotFallThroughFromSettingsToAnotherReceiver() async throws {
+        let first = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 807)
+        let second = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 808)
+        let settings = PreferencesWindowController(discovery: OMTDiscoveryManager())
+        XCTAssertTrue(AppDelegate.receiver(keyWindow: first.window, mainWindow: second.window, receivers: [first, second]) === first)
+        XCTAssertNil(AppDelegate.receiver(keyWindow: settings.window, mainWindow: first.window, receivers: [first, second]))
+        XCTAssertTrue(AppDelegate.receiver(keyWindow: nil, mainWindow: first.window, receivers: [first, second]) === first)
+        let retired = expectation(description: "Context fixture retired")
+        retired.expectedFulfillmentCount = 2
+        first.shutdown { retired.fulfill() }; second.shutdown { retired.fulfill() }
+        await fulfillment(of: [retired], timeout: 5)
+        first.window?.close(); second.window?.close(); settings.window?.close()
+    }
+
+    @MainActor
+    func testMovingBrowserUpdatesViewingVersusProjectionPolicyWithoutReplacingOutput() throws {
+        let main = try XCTUnwrap(DisplayCatalog.mainScreen)
+        guard let external = NSScreen.screens.first(where: { DisplayCatalog.identifier(for: $0) != DisplayCatalog.identifier(for: main) }) else {
+            throw XCTSkip("A second display is required for native screen movement")
+        }
+        let saved = Preferences.shared.fullscreenDisplayID
+        Preferences.shared.fullscreenDisplayID = DisplayCatalog.identifier(for: external)
+        defer { Preferences.shared.fullscreenDisplayID = saved }
+        let owner = NSWindow(contentRect: NSRect(x: main.frame.minX + 40, y: main.frame.minY + 40, width: 640, height: 360), styleMask: [.titled], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false
+        let home = try XCTUnwrap(owner.contentView)
+        let video = VideoView(frame: home.bounds); home.addSubview(video)
+        let controller = FullscreenController(owner: owner, home: home, video: video, keepOwnerVisible: true)
+        defer { controller.exit(showOwner: false); owner.close() }
+        controller.enter()
+        let output = try XCTUnwrap(video.window)
+        XCTAssertEqual(output.level, .screenSaver)
+        owner.setFrameOrigin(NSPoint(x: external.frame.minX + 40, y: external.frame.minY + 40))
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: owner)
+        XCTAssertEqual(output.level, .normal)
+        XCTAssertFalse(output.collectionBehavior.contains(.canJoinAllSpaces))
+        owner.setFrameOrigin(NSPoint(x: main.frame.minX + 40, y: main.frame.minY + 40))
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: owner)
+        XCTAssertEqual(output.level, .screenSaver)
+        XCTAssertTrue(video.window === output)
+        owner.setFrameOrigin(NSPoint(x: external.frame.minX + 40, y: external.frame.minY + 40))
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: owner)
+        controller.showControls()
+        owner.setFrameOrigin(NSPoint(x: main.frame.minX + 40, y: main.frame.minY + 40))
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: owner)
+        XCTAssertEqual(output.level, .normal, "Moving controls cannot restore projection above an open dialog")
+        controller.enter()
+        XCTAssertEqual(output.level, .screenSaver, "Explicit activation restores projection policy")
+    }
+
+    @MainActor
+    func testRetargetKeepsNativeControlsAboveOutputUntilExplicitActivation() throws {
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let saved = Preferences.shared.fullscreenDisplayID
+        Preferences.shared.fullscreenDisplayID = "absent-display-one"
+        defer { Preferences.shared.fullscreenDisplayID = saved }
+        let rect = NSRect(x: screen.visibleFrame.minX + 40, y: screen.visibleFrame.minY + 40, width: 640, height: 360)
+        let owner = NSWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
+        let settings = NSWindow(contentRect: rect, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        owner.isReleasedWhenClosed = false; settings.isReleasedWhenClosed = false
+        let home = try XCTUnwrap(owner.contentView)
+        let video = VideoView(frame: home.bounds); home.addSubview(video)
+        let controller = FullscreenController(owner: owner, home: home, video: video, keepOwnerVisible: true,
+                                             screens: { [screen] }, keyWindow: { settings })
+        defer { controller.exit(showOwner: false); owner.close(); settings.close() }
+        controller.enter()
+        settings.makeKeyAndOrderFront(nil)
+        Preferences.shared.fullscreenDisplayID = "absent-display-two"
+        let output = try XCTUnwrap(video.window)
+        XCTAssertTrue(controller.isFullscreen)
+        XCTAssertEqual(output.frame, screen.frame)
+        XCTAssertEqual(output.level, .normal)
+        let ordering = NSApp.orderedWindows
+        XCTAssertLessThan(try XCTUnwrap(ordering.firstIndex { $0 === settings }),
+                          try XCTUnwrap(ordering.firstIndex { $0 === output }))
+        NotificationCenter.default.post(name: NSWindow.didChangeScreenNotification, object: owner)
+        XCTAssertEqual(output.level, .normal, "A policy refresh cannot cover controls")
+        controller.enter()
+        XCTAssertTrue(video.window === output, "Explicit activation raises the same output")
+        let restoredOrdering = NSApp.orderedWindows
+        XCTAssertLessThan(try XCTUnwrap(restoredOrdering.firstIndex { $0 === output }),
+                          try XCTUnwrap(restoredOrdering.firstIndex { $0 === settings }))
     }
 
     @MainActor

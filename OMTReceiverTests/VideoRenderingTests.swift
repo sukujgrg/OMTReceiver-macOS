@@ -133,6 +133,23 @@ final class VideoRenderingTests: XCTestCase {
         for pixel in top { assertPixel(pixel, [255,255,255,255]) }
         for pixel in bottom { assertPixel(pixel, [0,0,0,255]) }
     }
+    func testScaledBobEdgesNeverSampleTheOppositeField() throws {
+        let white: [UInt8] = [255,255,255,255,255,255,255,255]
+        let black: [UInt8] = [0,0,0,255,0,0,0,255]
+        let bytes = white + black + white + black
+        // Integer and fractional scaling both sample beyond the first/last
+        // source texel. Field isolation must hold at every output pixel.
+        for (width, height) in [(8, 16), (5, 7)] {
+            for field in [Int32(0), Int32(1)] {
+                let pixels = try render(bytes, height: 4, stride: 8,
+                    codec: 0x41524742, flags: 1, field: field,
+                    outputWidth: width, outputHeight: height)
+                let expected: [UInt8] = field == 0 ? [255,255,255,255] : [0,0,0,255]
+                for pixel in pixels { assertPixel(pixel, expected) }
+            }
+        }
+    }
+
     func testFloatDrawablePreservesSourceGradientFinerThanEightBits() throws {
         let url = try XCTUnwrap(Bundle.main.url(forResource: "VideoShaders.metal", withExtension: "txt"))
         let source = try String(contentsOf: url, encoding: .utf8)

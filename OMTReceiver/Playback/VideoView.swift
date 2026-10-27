@@ -10,13 +10,16 @@ import os
 // AppKit/Metal state stays on MainActor. The sole nonisolated admission API
 // accesses only VideoMailbox, whose complete mutable state is lock protected.
 final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
+    typealias BufferAllocator = @MainActor (MTLDevice, UnsafeRawPointer, Int) -> MTLBuffer?
     var onToggleFullscreen: (() -> Void)?
     var onEscape: (() -> Void)?
-    var onError: ((String) -> Void)?
-    private(set) var errorMessage: String?
+    /// Notifications carry no stale payload; owners read current renderer health.
+    var onStateChange: (@MainActor () -> Void)?
+    var errorMessage: String? { initializationError ?? frameError }
     private(set) var displayedFormat: String?
     private let mailbox: VideoMailbox
     private let clock: PlaybackClock
+    private let allocateBuffer: BufferAllocator
     private var commandQueue: MTLCommandQueue?
     private var pipeline: MTLRenderPipelineState?
     private var current: VideoMailbox.Entry?
@@ -25,16 +28,22 @@ final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
     private var deinterlace: DeinterlaceMode = .automatic
     private var fieldOrder: FieldOrder = .topFirst
     private var background: VideoBackground = .black
-    private var reportedFailure = false
+    private var initializationError: String?
+    private var frameError: String?
     private var frameRateLimit: Int?
     private var screenObserver: NSObjectProtocol?
     private var windowScreenObserver: NSObjectProtocol?
     private let logger = Logger(subsystem: "com.suku.OMTReceiver.macOS", category: "Video")
 
-    init(frame frameRect: NSRect = .zero, clock: PlaybackClock = PlaybackClock()) {
+    init(frame frameRect: NSRect = .zero, clock: PlaybackClock = PlaybackClock(),
+         device: MTLDevice? = MTLCreateSystemDefaultDevice(),
+         allocateBuffer: @escaping BufferAllocator = {
+             $0.makeBuffer(bytes: $1, length: $2, options: .storageModeShared)
+         }) {
         self.clock = clock
+        self.allocateBuffer = allocateBuffer
         mailbox = VideoMailbox(clock: clock)
-        super.init(frame: frameRect, device: MTLCreateSystemDefaultDevice())
+        super.init(frame: frameRect, device: device)
         // Keep high-depth YUV and linear alpha composition above 8-bit
         // precision through Core Animation, even for ordinary SDR output.
         colorPixelFormat = .rgba16Float
@@ -100,6 +109,7 @@ final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
         mailbox.clear()
         current = nil; currentBuffer = nil; displayedFormat = nil
         clock.reset()
+        publishFrameError(nil)
     }
 
     func configure(deinterlace: DeinterlaceMode, fieldOrder: FieldOrder,
@@ -109,18 +119,49 @@ final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
     }
 
     private func setupMetal() {
-        guard let device else { report("Metal is unavailable on this Mac."); return }
+        guard let device else { reportInitializationError("Metal is unavailable on this Mac."); return }
         do {
             pipeline = try VideoPipelineCache.pipeline(device: device, format: colorPixelFormat)
-            commandQueue = device.makeCommandQueue()
-        } catch { report("Cannot prepare the video renderer: \(error.localizedDescription)") }
+            guard let queue = device.makeCommandQueue() else {
+                reportInitializationError("Cannot prepare the video renderer: a Metal command queue is unavailable.")
+                return
+            }
+            commandQueue = queue
+        } catch { reportInitializationError("Cannot prepare the video renderer: \(error.localizedDescription)") }
     }
 
-    private func report(_ message: String) {
-        errorMessage = message
+    private func reportInitializationError(_ message: String) {
+        initializationError = message
         logger.error("\(message, privacy: .public)")
-        guard !reportedFailure else { return }
-        reportedFailure = true; onError?(message)
+        onStateChange?()
+    }
+
+    private func publishFrameError(_ message: String?) {
+        guard frameError != message else { return }
+        frameError = message
+        if let message { logger.error("\(message, privacy: .public)") }
+        onStateChange?()
+    }
+
+    /// Preparation is independent of drawable availability. Only a successful
+    /// allocation replaces the last good picture and clears a transient failure.
+    @discardableResult
+    func prepareDueFrame(at time: TimeInterval) -> Bool {
+        guard initializationError == nil, let device,
+              let entry = mailbox.takeDue(at: time) else { return false }
+        let buffer = entry.frame.data.withUnsafeBytes { bytes -> MTLBuffer? in
+            guard let base = bytes.baseAddress else { return nil }
+            return allocateBuffer(device, base, bytes.count)
+        }
+        guard let buffer else {
+            publishFrameError("Insufficient GPU memory for this video format.")
+            return false
+        }
+        current = entry
+        currentBuffer = buffer
+        displayedFormat = entry.frame.summary
+        publishFrameError(nil)
+        return true
     }
 
     private func updateDisplayCadence() {
@@ -147,15 +188,7 @@ final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
             inflight.signal(); return
         }
         let now = CACurrentMediaTime()
-        if let entry = mailbox.takeDue(at: now) {
-            current = entry
-            displayedFormat = entry.frame.summary
-            currentBuffer = entry.frame.data.withUnsafeBytes { bytes in
-                guard let base = bytes.baseAddress else { return nil }
-                return device?.makeBuffer(bytes: base, length: bytes.count, options: .storageModeShared)
-            }
-            if currentBuffer == nil { report("Insufficient GPU memory for this video format.") }
-        }
+        prepareDueFrame(at: now)
         if let encoder = command.makeRenderCommandEncoder(descriptor: pass) {
             if let current, let currentBuffer, let pipeline {
                 let frame = current.frame
@@ -218,7 +251,7 @@ private struct VideoUniforms {
     var output: SIMD4<Float>
 }
 
-private final class VideoMailbox: @unchecked Sendable {
+final class VideoMailbox: @unchecked Sendable {
     struct Entry { let frame: VideoFrame; let presentationTime: Double }
     private let lock = NSLock()
     private let clock: PlaybackClock

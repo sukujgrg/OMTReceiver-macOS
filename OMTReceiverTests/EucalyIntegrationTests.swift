@@ -35,6 +35,7 @@ import XCTest
             try await Task.sleep(nanoseconds:50_000_000)
         }
         XCTAssertTrue(discovery.sources.contains(where:{$0.name.contains("eucaly Production Stress")}),discovery.statusText)
+        XCTAssertNil(audio.errorMessage, "Received PCM must also be accepted by the real Core Audio playback graph")
         await withCheckedContinuation { c in discovery.stop { c.resume() } }
         await withCheckedContinuation { c in session.stop { c.resume() } }
         audio.stop(); view.clear(); window.close()

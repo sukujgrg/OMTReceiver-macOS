@@ -19,19 +19,42 @@ jobs:
         run: |
           xcodebuild -version
           python3 --version
+      - name: Verify generated project
+        run: |
+          make project
+          git diff --exit-code -- OMTReceiver.xcodeproj
+      - name: Verify bundled SDK provenance
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          sdk = Path("Vendor/OMT")
+          manifest = json.loads((sdk / "provenance.json").read_text())
+          for name, expected in manifest["files_sha256"].items():
+              actual = hashlib.sha256((sdk / name).read_bytes()).hexdigest()
+              if actual != expected:
+                  raise SystemExit(f"Bundled SDK provenance mismatch: {name}")
+          print(f"Verified {len(manifest['files_sha256'])} pinned SDK files")
+          PY
       - name: App and release regressions
-        run: make test
+        run: |
+          mkdir -p build/Logs
+          set -o pipefail
+          make test 2>&1 | tee build/Logs/ci-test.log
       - name: Shell syntax
         run: |
           for script in scripts/*.sh; do
             bash -n "$script"
           done
       - name: Release archive
-        run: >-
-          xcodebuild -project OMTReceiver.xcodeproj -scheme OMTReceiver
-          -configuration Release -derivedDataPath build/DerivedData
-          -destination 'generic/platform=macOS' -archivePath build/Validation.xcarchive
-          CODE_SIGNING_ALLOWED=NO archive
+        run: |
+          mkdir -p build/Logs
+          set -o pipefail
+          xcodebuild -project OMTReceiver.xcodeproj -scheme OMTReceiver \
+            -configuration Release -derivedDataPath build/DerivedData \
+            -destination 'generic/platform=macOS' -archivePath build/Validation.xcarchive \
+            CODE_SIGNING_ALLOWED=NO archive 2>&1 | tee build/Logs/ci-archive.log
       - name: Verify Apple Silicon binaries and built metadata
         run: |
           python3 - <<'PY'
@@ -58,3 +81,13 @@ jobs:
               assert not info.get("SUEnableDownloaderService")
               print(f"{configuration}: OMTReceiver {version} with signed Sparkle updates")
           PY
+      - name: Preserve validation diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build/Logs/
+            build/DerivedData/Logs/Test/
+          if-no-files-found: warn
+          retention-days: 14
