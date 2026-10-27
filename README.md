@@ -56,6 +56,8 @@ Click a live source thumbnail, use the toolbar button, or choose **View → Ente
 
 A single-display Mac needs no external monitor. Fullscreen uses its main screen and yields normally when switching apps. **Show Sources**, Settings, updates, and connection dialogs reveal controls without disconnecting playback; click the playing thumbnail to raise the same output again. Escape or Close Window while output is key explicitly stops it. Fullscreen video fits within the screen’s camera-housing safe area, with black around the unobscured picture.
 
+Active full-quality output holds a native Foundation `ProcessInfo` activity with `.userInitiated` and `.idleDisplaySleepDisabled`. This prevents idle system/display sleep and App Nap while receiving, including when controls are visible. The activity survives retargeting, transfers during display ownership replacement, and ends when output stops or its target disappears. Silent thumbnail browsing does not hold an activity. Explicit system sleep remains under the user's control.
+
 | Action | Shortcut |
 | --- | --- |
 | New receiver window | ⌘N |

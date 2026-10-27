@@ -362,7 +362,117 @@ final class InterfaceTests: XCTestCase {
     }
 
     @MainActor
+    func testPlaybackActivityFollowsOutputOwnershipControlsRetargetAndFailure() throws {
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let savedDisplay = Preferences.shared.fullscreenDisplayID
+        let savedOptions = NSApp.presentationOptions
+        Preferences.shared.fullscreenDisplayID = "absent-activity-display-one"
+        var available = [screen]
+        let activity = PlaybackActivityProbe()
+        let rect = NSRect(x: screen.visibleFrame.minX + 40, y: screen.visibleFrame.minY + 40, width: 640, height: 360)
+        let firstOwner = NSWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
+        let secondOwner = NSWindow(contentRect: rect, styleMask: [.titled], backing: .buffered, defer: false)
+        firstOwner.isReleasedWhenClosed = false; secondOwner.isReleasedWhenClosed = false
+        let firstHome = try XCTUnwrap(firstOwner.contentView), secondHome = try XCTUnwrap(secondOwner.contentView)
+        let firstVideo = VideoView(frame: firstHome.bounds), secondVideo = VideoView(frame: secondHome.bounds)
+        firstHome.addSubview(firstVideo); secondHome.addSubview(secondVideo)
+        let first = FullscreenController(owner: firstOwner, home: firstHome, video: firstVideo,
+            screens: { available }, activityFactory: { activity.begin() })
+        let second = FullscreenController(owner: secondOwner, home: secondHome, video: secondVideo,
+            screens: { available }, activityFactory: { activity.begin() })
+        defer {
+            first.exit(showOwner: false); second.exit(showOwner: false)
+            firstOwner.close(); secondOwner.close()
+            Preferences.shared.fullscreenDisplayID = savedDisplay
+            NSApp.presentationOptions = savedOptions
+        }
+
+        first.enter(); first.enter(); first.showControls()
+        XCTAssertEqual(activity.events, ["begin 1"], "Showing controls and repeat activation keep one playback scope")
+        Preferences.shared.fullscreenDisplayID = "absent-activity-display-two"
+        XCTAssertTrue(first.isFullscreen)
+        XCTAssertEqual(activity.events, ["begin 1"], "Moving a live output preserves its activity")
+
+        second.enter()
+        XCTAssertFalse(first.isFullscreen)
+        XCTAssertTrue(second.isFullscreen)
+        XCTAssertEqual(activity.events, ["begin 1", "begin 2", "end 1"],
+                       "A replacement acquires its scope before the displaced receiver releases its scope")
+        first.exit(showOwner: false)
+        XCTAssertEqual(activity.events.count, 3, "A displaced receiver cannot release another output's scope")
+        second.exit(showOwner: false)
+        XCTAssertEqual(activity.events.last, "end 2")
+        XCTAssertEqual(NSApp.presentationOptions, savedOptions, "Replacing an output must not replace the original restoration baseline")
+
+        second.enter()
+        XCTAssertEqual(activity.events.last, "begin 3")
+        available = []
+        Preferences.shared.fullscreenDisplayID = "absent-activity-display-three"
+        XCTAssertFalse(second.isFullscreen)
+        XCTAssertEqual(activity.events.last, "end 3", "A failed retarget releases the old output's activity")
+        XCTAssertEqual(NSApp.presentationOptions, savedOptions)
+        second.enter()
+        XCTAssertEqual(activity.events.count, 6, "No display means no presentation or sleep assertion")
+    }
+
+    @MainActor
+    func testPresentationOptionsRestoreAfterDisplayReplacementAndEitherExitOrder() throws {
+        let main = try XCTUnwrap(DisplayCatalog.mainScreen)
+        guard let external = NSScreen.screens.first(where: { DisplayCatalog.identifier(for: $0) != DisplayCatalog.identifier(for: main) }) else {
+            throw XCTSkip("A second display is required for simultaneous presentation lifetimes")
+        }
+        let savedDisplay = Preferences.shared.fullscreenDisplayID
+        let savedOptions = NSApp.presentationOptions
+        Preferences.shared.fullscreenDisplayID = ""
+        defer { Preferences.shared.fullscreenDisplayID = savedDisplay; NSApp.presentationOptions = savedOptions }
+        let baseline: NSApplication.PresentationOptions = [.autoHideDock]
+        let presenting: NSApplication.PresentationOptions = [.autoHideDock, .autoHideMenuBar]
+        for mainExitsFirst in [true, false] {
+            NSApp.presentationOptions = baseline
+            var fixtures: [(NSWindow, FullscreenController)] = []
+            for screen in [main, external] {
+                let owner = NSWindow(contentRect: NSRect(x: screen.frame.minX + 40, y: screen.frame.minY + 40, width: 640, height: 360),
+                                     styleMask: [.titled], backing: .buffered, defer: false)
+                owner.isReleasedWhenClosed = false
+                let home = try XCTUnwrap(owner.contentView)
+                let video = VideoView(frame: home.bounds); home.addSubview(video)
+                let controller = FullscreenController(owner: owner, home: home, video: video,
+                    screens: { [screen] }, activityFactory: { NSObject() })
+                fixtures.append((owner, controller))
+            }
+            defer { fixtures.forEach { $0.1.exit(showOwner: false); $0.0.close() } }
+            fixtures[0].1.enter(); fixtures[1].1.enter()
+            XCTAssertTrue(fixtures.allSatisfy { $0.1.isFullscreen })
+            XCTAssertEqual(NSApp.presentationOptions, presenting)
+            let firstExit = mainExitsFirst ? 0 : 1
+            fixtures[firstExit].1.exit(showOwner: false)
+            XCTAssertEqual(NSApp.presentationOptions, presenting, "The remaining display still owns presentation policy")
+            fixtures[1 - firstExit].1.exit(showOwner: false)
+            XCTAssertEqual(NSApp.presentationOptions, baseline, "The last output restores the application's original policy")
+            fixtures[0].1.enter(); fixtures[0].1.enter()
+            fixtures[0].1.exit(showOwner: false)
+            XCTAssertEqual(NSApp.presentationOptions, baseline, "Repeat activation cannot overwrite the restoration baseline")
+        }
+    }
+
+    @MainActor
     private func descendants(of view: NSView) -> [NSView] {
         [view] + view.subviews.flatMap { descendants(of: $0) }
+    }
+}
+
+private final class PlaybackActivityProbe {
+    var events: [String] = []
+    private var next = 0
+    func begin() -> AnyObject {
+        next += 1
+        events.append("begin \(next)")
+        return Scope(probe: self, number: next)
+    }
+    private final class Scope {
+        let probe: PlaybackActivityProbe
+        let number: Int
+        init(probe: PlaybackActivityProbe, number: Int) { self.probe = probe; self.number = number }
+        deinit { probe.events.append("end \(number)") }
     }
 }

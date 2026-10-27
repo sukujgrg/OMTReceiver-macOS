@@ -12,7 +12,11 @@ final class AudioPlayer: @unchecked Sendable {
     private let lock = NSLock()
     private var healthError: String?
     var errorMessage: String? { lock.lock(); defer { lock.unlock() }; return healthError }
-    private let queue = DispatchQueue(label: "OMTReceiver.audio", qos: .userInteractive)
+    // This is the graph-control/submission lane, not the real-time render
+    // thread (which AVAudioEngine owns). Native graph operations synchronously
+    // join framework workers at default QoS, so UI priority is inappropriate.
+    // Keep creation, scheduling, reset and retirement serialized on this lane.
+    private let queue = DispatchQueue(label: "OMTReceiver.audio.control", qos: .default)
     private let signal: DispatchSourceUserDataAdd
     private var incoming = AudioFrameQueue()
     private var muted = false
@@ -148,10 +152,25 @@ final class AudioPlayer: @unchecked Sendable {
     deinit {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
         signal.cancel()
-        // No queued closure retains self; queue-owned graph cannot be used after
-        // the final reference is released.
-        renderer?.stop()
+        // Pending handlers hold only weak self; an executing drain keeps self
+        // alive. At final release there can therefore be no concurrent graph
+        // operation. Transfer its unique ownership onto the same control lane,
+        // including stop and final ARC release, rather than joining Core Audio
+        // from whichever thread releases AudioPlayer (possibly the main thread).
+        let retirement = renderer.map(AudioRendererRetirement.init)
+        renderer = nil
+        if let retirement {
+            queue.async { retirement.finish() }
+        }
     }
+}
+
+/// A one-way ownership transfer used only by AudioPlayer's final release. The
+/// non-Sendable graph is used and released once, on its original serial lane.
+private final class AudioRendererRetirement: @unchecked Sendable {
+    private var renderer: (any AudioRendering)?
+    init(_ renderer: any AudioRendering) { self.renderer = renderer }
+    func finish() { renderer?.stop(); renderer = nil }
 }
 
 /// Pure PCM backlog policy. Keep the newest bounded window rather than
@@ -220,20 +239,21 @@ protocol AudioRendering: AnyObject {
     func stop()
 }
 
-private final class CoreAudioRenderer: AudioRendering {
-    private let engine = AVAudioEngine()
+final class CoreAudioRenderer: AudioRendering {
+    private let engine: AVAudioEngine
     private let player = AVAudioPlayerNode()
     private let format: AVAudioFormat
     var isRunning: Bool { engine.isRunning }
     var configurationObject: AnyObject? { engine }
 
-    init(sampleRate: Double, channels: Int) throws {
+    init(sampleRate: Double, channels: Int, engine: AVAudioEngine = AVAudioEngine()) throws {
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32,
                                         sampleRate: sampleRate, channels: AVAudioChannelCount(channels), interleaved: false) else {
             throw NSError(domain: "OMTReceiver.Audio", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Unsupported audio format."])
         }
         self.format = format
+        self.engine = engine
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
         engine.prepare()

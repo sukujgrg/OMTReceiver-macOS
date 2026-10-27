@@ -4,4 +4,5 @@ DerivedData/
 xcuserdata/
 Config/Signing.local.xcconfig
 .DS_Store
+OMTSender
 __pycache__/

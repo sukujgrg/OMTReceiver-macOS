@@ -249,7 +249,10 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         else { session.disconnect(); audio.stop(); video.clear(); video.isPaused = true; refreshDiscovery(); updateState() }
     }
     @objc func toggleSidebar(_ sender: Any?) {
-        if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.showControls() }
+        // Another receiver may project onto this browser's display. Resolve
+        // every covering output just as Settings and connection sheets do.
+        if let onRevealControls { onRevealControls(window) }
+        else if fullscreenDisplayID == window?.screen.map(DisplayCatalog.identifier) { fullscreen.showControls() }
         window?.makeKeyAndOrderFront(nil); sourceBrowser.focusSelectedSource()
     }
     @objc func showTestPattern(_ sender: Any?) { connect(.testPattern) }
