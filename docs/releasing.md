@@ -16,7 +16,7 @@ This runs `scripts/build.sh`: archive the arm64 application, export with Xcode's
 
 1. Use a Git checkout whose single HTTPS `origin` push URL is `https://github.com/sukujgrg/OMTReceiver-macOS.git`.
 2. Select the configured development team in Xcode. Distribution requires a valid **Developer ID Application** certificate in the local Keychain.
-3. Configure Apple's notarization profile. The default is the existing `eucalyNotary` profile, which may be reused for this app under the same Apple account/team. Select a different profile with `NOTARY_PROFILE=Name` if needed.
+3. Create a **new Apple app-specific password** labeled `OMTReceiver macOS notarization` in [Apple Account → Sign-In and Security → App-Specific Passwords](https://support.apple.com/en-us/102654). Run `make setup-notarization` in your local Terminal to store it under the dedicated **OMTReceiverNotary** profile. Apple's tool prompts for your Developer Apple ID, password and team (this checkout's configured team is `E5N29VFW8T`), validates the credentials, and stores them in Keychain. Do not paste the password into chat, Make arguments, environment variables or source files. The project does not copy or reuse eucaly's password; renaming a profile alone would not create a separate credential. An explicitly selected alternative profile is supported with `NOTARY_PROFILE=Name`; there is no fallback to another app's profile.
 4. Initialize the separate OMTReceiver Sparkle key as described in [self-updates.md](self-updates.md). Its account is **com.suku.OMTReceiver-macOS**; the eucaly signing key is not reused.
 5. Push or merge the source to `main` and enable the checked-in **Validate** workflow on the same runner configuration as eucaly (`xcode-27`, Xcode 27.1).
 
@@ -45,6 +45,7 @@ A genuinely empty release repository can create its first signed appcast. Once a
 | Command | Result |
 | --- | --- |
 | `make build` | Archive/export the local app into `~/Applications`. |
+| `make setup-notarization` | Secure interactive setup of the dedicated notarization Keychain profile. |
 | `make test` | Run native app tests plus offline release/feed regressions. |
 | `make test-release` | Run only offline release/feed regressions. |
 | `make release` | Prepare and publish the signed, notarized release. |
@@ -64,7 +65,7 @@ Preparation is retained under `build/release/v<VERSION>/`: `state.json`, `work/`
 If Apple's submission succeeded but the response was lost, use:
 
 ```sh
-xcrun notarytool history --keychain-profile eucalyNotary
+xcrun notarytool history --keychain-profile OMTReceiverNotary
 python3 scripts/release.py --no-publish --resume-notarization SUBMISSION_ID
 make release-publish
 ```

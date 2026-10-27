@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
-.PHONY: help build run project test test-release clean release release-check release-notarize release-publish
+.PHONY: help build run project test test-release clean release release-check release-notarize release-publish setup-notarization
 
-NOTARY_PROFILE ?= eucalyNotary
+NOTARY_PROFILE ?= OMTReceiverNotary
 NOTES_FILE ?=
 # Optional notes must be outside the checkout, e.g. /tmp/omt-receiver-notes.md.
 
@@ -9,6 +9,7 @@ help:
 	@printf '%s\n' \
 	  'make build             Archive and export an Apple Silicon app into ~/Applications' \
 	  'make run               Build and open the installed app' \
+	  'make setup-notarization Store dedicated notarization credentials securely in Keychain' \
 	  'make release           Validate, sign, notarize, tag, and publish from this Mac' \
 	  'make release-check     Check source, destination, and CI only' \
 	  'make release-notarize  Produce signed local artifacts without publishing' \
@@ -27,6 +28,11 @@ run: build
 project:
 	python3 scripts/generate-project.py
 
+# Let Apple's tool prompt directly; never accept or forward a password argument.
+setup-notarization:
+	@if [ ! -t 0 ] || [ ! -t 1 ]; then printf '%s\n' 'Run make setup-notarization in your local Terminal; credentials must be entered at the secure prompt.' >&2; exit 1; fi
+	xcrun notarytool store-credentials "$(NOTARY_PROFILE)"
+
 clean:
 	python3 scripts/release.py --clean
 
@@ -40,13 +46,13 @@ release:
 	python3 scripts/release.py --notary-profile "$(NOTARY_PROFILE)" $(if $(NOTES_FILE),--notes "$(NOTES_FILE)")
 
 release-check:
-	python3 scripts/release.py --check
+	python3 scripts/release.py --notary-profile "$(NOTARY_PROFILE)" --check
 
 release-notarize:
 	python3 scripts/release.py --notary-profile "$(NOTARY_PROFILE)" --no-publish
 
 release-publish:
-	python3 scripts/release.py --publish-only $(if $(NOTES_FILE),--notes "$(NOTES_FILE)")
+	python3 scripts/release.py --notary-profile "$(NOTARY_PROFILE)" --publish-only $(if $(NOTES_FILE),--notes "$(NOTES_FILE)")
 
 test-release:
 	python3 scripts/test-update-feed.py

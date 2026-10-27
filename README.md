@@ -15,6 +15,7 @@ The Make workflow matches eucaly:
 ```sh
 make build             # signed Release archive/export into ~/Applications/OMTReceiver.app
 make run               # build and open that installed app
+make setup-notarization # securely store a fresh OMTReceiver-only app-specific password
 make test              # native app tests + offline release/feed regressions
 make release-check     # verify clean source, GitHub destination and exact-commit CI
 make release-notarize  # prepare signed/notarized artifacts without publishing

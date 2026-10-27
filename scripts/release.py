@@ -777,9 +777,9 @@ def release(args):
             print(f"Release complete: https://github.com/{repo}/releases/tag/{tag}", flush=True)
 
 
-if __name__ == "__main__":
+def argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--notary-profile", default="eucalyNotary", help="local Keychain profile (default: eucalyNotary)")
+    parser.add_argument("--notary-profile", default="OMTReceiverNotary", help="local Keychain profile (default: OMTReceiverNotary)")
     parser.add_argument("--notes", type=Path, help="optional release notes file outside the checkout")
     parser.add_argument("--resume-notarization", help="recover a lost Apple submission ID for the saved archive")
     modes = parser.add_mutually_exclusive_group()
@@ -787,6 +787,11 @@ if __name__ == "__main__":
     modes.add_argument("--check", action="store_true", help="only verify source, destination, and CI; do not build or publish")
     modes.add_argument("--no-publish", action="store_true", help="create signed artifacts locally without tagging or publishing")
     modes.add_argument("--publish-only", action="store_true", help="publish already prepared artifacts without building or notarizing")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = argument_parser()
     try:
         args = parser.parse_args()
         if args.clean:

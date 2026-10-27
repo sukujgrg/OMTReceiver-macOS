@@ -65,6 +65,7 @@ class ReleaseFlowTests(unittest.TestCase):
         self.ci_status = "completed"
         self.missing_runs = 0
         self.pushed = True
+        self.notary_profile = "OMTReceiverNotary"
         self.notary_status = "Accepted"
         self.fail_feed = False
         self.after_archive = lambda: None
@@ -322,7 +323,7 @@ class ReleaseFlowTests(unittest.TestCase):
                 shutil.copytree(args[-2], args[-1])
             return
         if args[:2] == ("xcrun", "notarytool"):
-            self.assertEqual(args[args.index("--keychain-profile") + 1], "eucalyNotary")
+            self.assertEqual(args[args.index("--keychain-profile") + 1], self.notary_profile)
             if args[2] == "history":
                 return '{"history": []}'
             if args[2] == "submit":
@@ -358,7 +359,7 @@ class ReleaseFlowTests(unittest.TestCase):
         self.fail(f"Unexpected command: {args}")
 
     def invoke(self, **options):
-        args = dict(notary_profile="eucalyNotary", notes=None, check=False, no_publish=False,
+        args = dict(notary_profile=self.notary_profile, notes=None, check=False, no_publish=False,
                     publish_only=False, resume_notarization=None)
         args.update(options)
         release.release(argparse.Namespace(**args))
@@ -1084,6 +1085,17 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertEqual(self.archive_count(), 0)
         self.assert_not_published()
 
+    def test_explicit_notary_profile_is_used_for_every_notary_operation(self):
+        self.notary_profile = "ReceiverOnlyTestProfile"
+        self.invoke(notary_profile=self.notary_profile, no_publish=True)
+        operations = [call for call in self.calls if call[:2] == ("xcrun", "notarytool")]
+        self.assertTrue(operations)
+        self.assertEqual({call[2] for call in operations}, {"history", "submit", "info", "wait", "log"})
+        for call in operations:
+            self.assertEqual(call[call.index("--keychain-profile") + 1], self.notary_profile)
+            self.assertNotIn("--password", call)
+        self.assert_not_published()
+
     def test_bad_notary_profile_is_detected_before_archiving(self):
         self.fail_once("history")
         with self.assertRaises(subprocess.CalledProcessError):
@@ -1282,6 +1294,28 @@ class ReleaseFlowTests(unittest.TestCase):
         self.assertEqual(self.state["build"], "99991231235961")
         self.assertTrue(any(call[0].endswith("sign_update") and "--verify" in call for call in self.calls))
 
+
+
+class NotaryConfigurationTests(unittest.TestCase):
+    def test_cli_and_all_make_release_modes_default_to_dedicated_profile(self):
+        self.assertEqual(release.argument_parser().parse_args([]).notary_profile, "OMTReceiverNotary")
+        self.assertEqual(release.argument_parser().parse_args(["--notary-profile", "CustomProfile"]).notary_profile, "CustomProfile")
+        for profile in (None, "CustomProfile"):
+            for target in ("release", "release-check", "release-notarize", "release-publish"):
+                with self.subTest(profile=profile, target=target):
+                    command = ["make", "-n", target]
+                    if profile: command.append("NOTARY_PROFILE=" + profile)
+                    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, check=True)
+                    self.assertIn('--notary-profile "' + (profile or "OMTReceiverNotary") + '"', result.stdout)
+                    self.assertNotIn("--password", result.stdout)
+                    self.assertNotIn("eucalyNotary", result.stdout)
+
+    def test_setup_requires_a_terminal_before_accessing_credentials(self):
+        result = subprocess.run(["make", "setup-notarization"], cwd=ROOT,
+                                stdin=subprocess.DEVNULL, text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("local Terminal", result.stderr)
+        self.assertNotIn("xcrun notarytool", result.stdout)
 
 
 class GitHubTransportTests(unittest.TestCase):
