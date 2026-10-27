@@ -1,5 +1,16 @@
 import AppKit
 
+/// A full-quality output is an ongoing user-requested presentation, including
+/// while its controls are visible. Releasing this scope restores ordinary idle
+/// sleep/App Nap policy; browsing thumbnails alone never creates an activity.
+final class FullscreenPlaybackActivity {
+    private let token = ProcessInfo.processInfo.beginActivity(
+        options: [.userInitiated, .idleDisplaySleepDisabled],
+        reason: "Receiving fullscreen OMT video and audio")
+
+    deinit { ProcessInfo.processInfo.endActivity(token) }
+}
+
 /// NSWindow's explicit-screen initializer interprets contentRect in that
 /// screen's coordinates. Passing screen.frame would add its origin twice.
 final class PresentationWindow: NSWindow {
@@ -38,6 +49,8 @@ final class FullscreenController: NSObject, NSWindowDelegate {
     private let screens: () -> [NSScreen]
     private let safeAreaInsets: (NSScreen) -> NSEdgeInsets
     private let keyWindow: @MainActor () -> NSWindow?
+    private let activityFactory: () -> AnyObject
+    private var playbackActivity: AnyObject?
     private let keepOwnerVisible: Bool
     var restoreOwnerFocus: (() -> Void)?
     private var presentation: PresentationWindow?
@@ -56,8 +69,9 @@ final class FullscreenController: NSObject, NSWindowDelegate {
 
     init(owner: NSWindow, home: NSView, video: VideoView, keepOwnerVisible: Bool = false, screens: @escaping () -> [NSScreen] = { NSScreen.screens },
          safeAreaInsets: @escaping (NSScreen) -> NSEdgeInsets = { $0.safeAreaInsets },
-         keyWindow: @escaping @MainActor () -> NSWindow? = { NSApp.keyWindow }) {
-        self.owner = owner; self.home = home; self.video = video; self.keepOwnerVisible = keepOwnerVisible; self.screens = screens; self.safeAreaInsets = safeAreaInsets; self.keyWindow = keyWindow
+         keyWindow: @escaping @MainActor () -> NSWindow? = { NSApp.keyWindow },
+         activityFactory: @escaping () -> AnyObject = { FullscreenPlaybackActivity() }) {
+        self.owner = owner; self.home = home; self.video = video; self.keepOwnerVisible = keepOwnerVisible; self.screens = screens; self.safeAreaInsets = safeAreaInsets; self.keyWindow = keyWindow; self.activityFactory = activityFactory
         super.init()
         ownerScreenObserver = NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification, object: owner, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { if let self, let window = self.presentation { self.applyPolicy(to: window) } }
@@ -76,6 +90,9 @@ final class FullscreenController: NSObject, NSWindowDelegate {
         guard let screen = DisplayCatalog.target(identifier: Preferences.shared.fullscreenDisplayID, screens: screens()) else { return }
         requestedDisplayID = Preferences.shared.fullscreenDisplayID
         targetID = DisplayCatalog.identifier(for: screen)
+        // Acquire the replacement's scope before retiring a displaced output.
+        // A display handoff must not briefly restore idle policy.
+        if playbackActivity == nil { playbackActivity = activityFactory() }
         Self.owners = Self.owners.filter { $0.value.controller?.isFullscreen == true }
         Self.owners[targetID]?.controller?.exit(showOwner: false)
         // The window must already belong to the target screen when MetalKit's
@@ -146,6 +163,7 @@ final class FullscreenController: NSObject, NSWindowDelegate {
         if let home { pin(video, to: home); home.layoutSubtreeIfNeeded() }
         window.orderOut(nil)
         window.close()
+        if !isRetargeting { playbackActivity = nil }
         owner?.isExcludedFromWindowsMenu = originalExcludedFromWindowsMenu
         if Self.owners[targetID]?.controller === self { Self.owners.removeValue(forKey: targetID) }
         if Self.owners.isEmpty { NSApp.presentationOptions = Self.originalPresentationOptions }
@@ -175,7 +193,7 @@ final class FullscreenController: NSObject, NSWindowDelegate {
         exit(showOwner: false)
         enter(preservingControls: controls)
         isRetargeting = false
-        if presentation == nil { onChange?() }
+        if presentation == nil { playbackActivity = nil; onChange?() }
     }
     private func pin(_ view: NSView, to parent: NSView, insets: NSEdgeInsets = NSEdgeInsets()) {
         NSLayoutConstraint.deactivate(surfaceConstraints)

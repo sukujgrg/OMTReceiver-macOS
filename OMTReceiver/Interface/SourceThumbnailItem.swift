@@ -87,6 +87,9 @@ final class SourceThumbnailCard: NSButton {
     override var intrinsicContentSize: NSSize {
         NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
+    // Browsing selection is independent of the native button's momentary
+    // pressed state and of the source currently playing on the display.
+    override func isAccessibilitySelected() -> Bool { isSelected }
 
     func configure(source: OMTSource, status state: String, format: String,
                    isPlaying: Bool, preview surface: NSView?) {

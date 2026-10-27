@@ -20,7 +20,7 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
     private var currentStatus = "Looking for OMT sources…"
     private var refreshScheduled = false
     private var stopped = false
-    private var windowObserver: NSObjectProtocol?
+    private var windowObservers: [NSObjectProtocol] = []
     private var scrollObserver: NSObjectProtocol?
     private var clipFrameObserver: NSObjectProtocol?
     private var viewportSize = NSSize.zero
@@ -47,6 +47,7 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
         let root = SourceBrowserRootView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
         root.onLayout = { [weak self] in self?.updateGridLayout() }
         root.onWindowChanged = { [weak self] in self?.observeWindow() }
+        root.onVisibilityChanged = { [weak self] in self?.scheduleVisibleRefresh() }
         view = root
         let heading = NSTextField(labelWithString: "Sources")
         heading.font = .systemFont(ofSize: 20, weight: .semibold)
@@ -219,13 +220,19 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
     }
 
     private func observeWindow() {
-        if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        windowObservers.removeAll()
         observedWindow = view.window
         if let window = observedWindow {
-            windowObserver = NotificationCenter.default.addObserver(
-                forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.scheduleVisibleRefresh() } }
-        } else { windowObserver = nil }
+            // Miniaturization is a separate lifecycle event. Do not depend on
+            // WindowServer delivering an occlusion update in the same turn.
+            for name in [NSWindow.didChangeOcclusionStateNotification,
+                         NSWindow.didMiniaturizeNotification, NSWindow.didDeminiaturizeNotification] {
+                windowObservers.append(NotificationCenter.default.addObserver(
+                    forName: name, object: window, queue: .main
+                ) { [weak self] _ in MainActor.assumeIsolated { self?.scheduleVisibleRefresh() } })
+            }
+        }
         scheduleVisibleRefresh()
     }
 
@@ -282,7 +289,7 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
     @objc private func connectAddress() { onConnectAddress?() }
 
     deinit {
-        if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
+        windowObservers.forEach { NotificationCenter.default.removeObserver($0) }
         if let scrollObserver { NotificationCenter.default.removeObserver(scrollObserver) }
         if let clipFrameObserver { NotificationCenter.default.removeObserver(clipFrameObserver) }
     }
@@ -292,8 +299,11 @@ final class SourceBrowserViewController: NSViewController, NSCollectionViewDeleg
 private final class SourceBrowserRootView: NSView {
     var onLayout: (() -> Void)?
     var onWindowChanged: (() -> Void)?
+    var onVisibilityChanged: (() -> Void)?
     override func layout() { super.layout(); onLayout?() }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); onWindowChanged?() }
+    override func viewDidHide() { super.viewDidHide(); onVisibilityChanged?() }
+    override func viewDidUnhide() { super.viewDidUnhide(); onVisibilityChanged?() }
 }
 
 @MainActor

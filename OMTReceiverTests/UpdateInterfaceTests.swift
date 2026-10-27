@@ -73,6 +73,22 @@ final class UpdateInterfaceTests: XCTestCase {
         let controls = descendants(content)
         XCTAssertEqual(Set(controls.compactMap { ($0 as? NSPopUpButton)?.accessibilityLabel() }),
                        ["Default fullscreen display", "Interlaced video", "Field order", "Alpha background"])
+        for (label, value) in [("Interlaced video", Preferences.shared.deinterlace.title),
+                               ("Field order", Preferences.shared.fieldOrder.title),
+                               ("Alpha background", Preferences.shared.background.title)] {
+            let popup = try XCTUnwrap(controls.compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityLabel() == label })
+            // A single-cell NSControl exposes its cell to accessibility clients.
+            // The outer NSPopUpButton's default value getter is intentionally nil.
+            let accessible = try XCTUnwrap(NSAccessibility.unignoredDescendant(of: popup) as? NSAccessibilityProtocol)
+            XCTAssertEqual(accessible.accessibilityRole(), .popUpButton)
+            XCTAssertEqual(accessible.accessibilityValue() as? String, value,
+                           "The native accessible popup must expose its current selection")
+            let originalSelection = popup.indexOfSelectedItem
+            popup.selectItem(at: (originalSelection + 1) % popup.numberOfItems)
+            XCTAssertEqual(accessible.accessibilityValue() as? String, popup.titleOfSelectedItem,
+                           "AppKit must update the exposed selection without a manually cached accessibility value")
+            popup.selectItem(at: originalSelection)
+        }
         let checkbox = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "Automatically Check for Updates" })
         let check = try XCTUnwrap(controls.compactMap { $0 as? NSButton }.first { $0.title == "Check for Updates…" })
         XCTAssertEqual(checkbox.state, .off)
@@ -177,6 +193,55 @@ final class UpdateInterfaceTests: XCTestCase {
         XCTAssertTrue(second.isFullscreen)
         XCTAssertEqual(second.fullscreenDisplayID, DisplayCatalog.identifier(for: external))
         await retire([first, second])
+    }
+
+    func testShowSourcesRevealsBrowserCoveredByAnotherReceiversProjection() async throws {
+        let main = try XCTUnwrap(DisplayCatalog.mainScreen)
+        guard let target = NSScreen.screens.first(where: { DisplayCatalog.identifier(for: $0) != DisplayCatalog.identifier(for: main) }) else {
+            throw XCTSkip("A second display is required for a browser covered by another receiver's projection")
+        }
+        let saved = Preferences.shared.fullscreenDisplayID
+        Preferences.shared.fullscreenDisplayID = DisplayCatalog.identifier(for: target)
+        let browser = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 927)
+        let playing = ReceiverWindowController(discovery: OMTDiscoveryManager(), number: 928)
+        defer {
+            browser.onRevealControls = nil
+            browser.shutdown {}; playing.shutdown {}
+            browser.window?.close(); playing.window?.close()
+            Preferences.shared.fullscreenDisplayID = saved
+        }
+        let browserWindow = try XCTUnwrap(browser.window), controlsWindow = try XCTUnwrap(playing.window)
+        browserWindow.setFrameOrigin(NSPoint(x: target.visibleFrame.minX + 40, y: target.visibleFrame.minY + 40))
+        controlsWindow.setFrameOrigin(NSPoint(x: main.visibleFrame.minX + 40, y: main.visibleFrame.minY + 40))
+        browser.showWindow(nil); playing.showWindow(nil)
+        playing.connect(.testPattern)
+        let output = try XCTUnwrap(NSApp.windows.first { playing.owns($0) && $0 !== controlsWindow })
+        let video = try XCTUnwrap(descendants(output.contentView!).compactMap { $0 as? VideoView }.first)
+        XCTAssertEqual(browserWindow.screen.map(DisplayCatalog.identifier), DisplayCatalog.identifier(for: target))
+        XCTAssertEqual(output.screen.map(DisplayCatalog.identifier), DisplayCatalog.identifier(for: target))
+        XCTAssertEqual(output.level, .screenSaver)
+        var reveals = 0
+        browser.onRevealControls = { [weak browser, weak playing] invoking in
+            reveals += 1
+            XCTAssertTrue(invoking === browserWindow)
+            guard let browser, let playing else { XCTFail("Both receivers must survive the Sources command"); return }
+            AppDelegate.revealControls(for: invoking, receivers: [browser, playing])
+        }
+
+        // Invoke the actual receiver command; directly calling revealControls
+        // would conceal a regression in the command's application-level route.
+        browser.toggleSidebar(nil)
+        XCTAssertEqual(reveals, 1)
+        XCTAssertTrue(playing.isFullscreen)
+        XCTAssertEqual(playing.selectedSource, .testPattern, "Showing another browser cannot stop the active source or audio")
+        XCTAssertTrue(video.window === output, "The presentation keeps the same full-quality surface")
+        XCTAssertEqual(output.level, .normal, "The covering projection yields to native controls on its display")
+        XCTAssertTrue(browserWindow.firstResponder === browser.sourceBrowser.collectionView)
+        let order = NSApp.orderedWindows
+        XCTAssertLessThan(try XCTUnwrap(order.firstIndex { $0 === browserWindow }),
+                          try XCTUnwrap(order.firstIndex { $0 === output }),
+                          "The invoking source browser must be in front of the covering output")
+        await retire([browser, playing])
     }
 
     private func badge(_ controller: ReceiverWindowController) -> NSToolbarItem? {

@@ -61,18 +61,88 @@ final class SourceBrowserTests: XCTestCase {
         let browser = SourceBrowserViewController { source in
             created += 1; return PreviewFixture(source: source, stopImmediately: true)
         }
-        let sources = [source("a"), source("b")]
-        browser.update(sources: sources, status: "2 sources", selectedSource: sources[0])
+        let sources = [source("a"), source("b"), source("c")]
+        browser.update(sources: sources, status: "3 sources", selectedSource: sources[0])
         let collection = browser.collectionView
         collection.selectItems(at: [IndexPath(item: 1, section: 0)], scrollPosition: [])
         let selection = collection.selectionIndexPaths
-        browser.update(sources: sources, status: "2 sources", selectedSource: sources[0])
+        browser.update(sources: sources, status: "3 sources", selectedSource: sources[2])
         XCTAssertEqual(collection.selectionIndexPaths, selection)
+        XCTAssertEqual(browser.activationSource, sources[1])
+        browser.update(sources: [sources[2], sources[0], sources[1]], status: "3 sources", selectedSource: nil)
+        XCTAssertEqual(collection.selectionIndexPaths, [IndexPath(item: 2, section: 0)], "Discovery reordering retains the browsed identity")
         XCTAssertEqual(browser.activationSource, sources[1])
         XCTAssertEqual(created, 0, "Loading an unattached browser must not open network connections")
         var stopped = false
         browser.stop { stopped = true }
         XCTAssertTrue(stopped)
+    }
+
+    func testWindowVisibilityTransitionsRetireBeforeRestartingPreviews() async throws {
+        var made: [PreviewFixture] = []
+        let browser = SourceBrowserViewController(maximumPreviewCount: 2) { source in
+            let preview = PreviewFixture(source: source); made.append(preview); return preview
+        }
+        browser.update(sources: [source("a"), source("b")], status: "2 sources", selectedSource: nil)
+        let window = PreviewVisibilityWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                                             styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.contentView?.layoutSubtreeIfNeeded()
+        browser.collectionView.layoutSubtreeIfNeeded()
+        window.orderFront(nil)
+        defer {
+            browser.stop {}
+            made.forEach { $0.finishStop() }
+            window.close()
+        }
+        await flushBrowserUpdates()
+        XCTAssertEqual(made.count, 2)
+        guard made.count == 2 else { return }
+        XCTAssertTrue(made.allSatisfy { $0.starts == 1 })
+
+        // An occluded window retires its receivers. Becoming visible again
+        // must wait for those workers instead of exceeding the resource budget.
+        window.reportedOcclusion = []
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        await flushBrowserUpdates()
+        XCTAssertTrue(made.allSatisfy { $0.stops == 1 })
+        window.reportedOcclusion = .visible
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        await flushBrowserUpdates()
+        XCTAssertEqual(made.count, 2)
+        made[0].finishStop(); made[1].finishStop()
+        XCTAssertEqual(made.count, 4)
+        guard made.count == 4 else { return }
+
+        // Exercise the distinct miniaturization notification without relying
+        // on an accompanying occlusion update from the hosted WindowServer.
+        window.reportedMiniaturized = true
+        NotificationCenter.default.post(name: NSWindow.didMiniaturizeNotification, object: window)
+        await flushBrowserUpdates()
+        XCTAssertEqual(made[2].stops, 1); XCTAssertEqual(made[3].stops, 1)
+        made[2].finishStop(); made[3].finishStop()
+        window.reportedMiniaturized = false
+        NotificationCenter.default.post(name: NSWindow.didDeminiaturizeNotification, object: window)
+        await flushBrowserUpdates()
+        XCTAssertEqual(made.count, 6)
+        guard made.count == 6 else { return }
+
+        // Hiding the view itself is independent of window occlusion.
+        browser.view.isHidden = true
+        await flushBrowserUpdates()
+        XCTAssertEqual(made[4].stops, 1); XCTAssertEqual(made[5].stops, 1)
+        made[4].finishStop(); made[5].finishStop()
+        browser.view.isHidden = false
+        await flushBrowserUpdates()
+        XCTAssertEqual(made.count, 8)
+        guard made.count == 8 else { return }
+
+        // Finally use real AppKit window ordering to exercise isVisible.
+        window.orderOut(nil)
+        NotificationCenter.default.post(name: NSWindow.didChangeOcclusionStateNotification, object: window)
+        await flushBrowserUpdates()
+        XCTAssertEqual(made[6].stops, 1); XCTAssertEqual(made[7].stops, 1)
     }
 
     func testNativeButtonActionUsesHitSourceAndRestoresCollectionSelection() throws {
@@ -131,6 +201,29 @@ final class SourceBrowserTests: XCTestCase {
         XCTAssertEqual(escaped, 1)
     }
 
+    func testWindowResponderRoutesArrowNavigationAndActivationToTheSameSource() throws {
+        let (browser, window) = makeBrowser()
+        defer { browser.stop {}; window.close() }
+        let collection = browser.collectionView
+        let first = IndexPath(item: 0, section: 0), second = IndexPath(item: 1, section: 0)
+        collection.selectionIndexPaths = [first]
+        XCTAssertTrue(window.makeFirstResponder(collection))
+        var activated: [OMTSource] = []
+        browser.onActivate = { activated.append($0) }
+
+        window.sendEvent(try key("\u{f703}", code: 124, window: window))
+        XCTAssertEqual(collection.selectionIndexPaths, [second])
+        XCTAssertTrue(activated.isEmpty, "Arrow navigation must not switch the live output")
+        let firstCard = try XCTUnwrap(collection.item(at: first)?.view as? SourceThumbnailCard)
+        let secondCard = try XCTUnwrap(collection.item(at: second)?.view as? SourceThumbnailCard)
+        XCTAssertFalse(firstCard.isAccessibilitySelected())
+        XCTAssertTrue(secondCard.isAccessibilitySelected())
+
+        window.sendEvent(try key("\r", code: 36, window: window))
+        XCTAssertEqual(activated, [source("b")])
+        XCTAssertTrue(window.firstResponder === collection)
+    }
+
     func testCardReplacementDetachesOldSurfaceAndAccessibilityPressActivatesOnce() {
         let card = SourceThumbnailCard()
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
@@ -149,6 +242,11 @@ final class SourceBrowserTests: XCTestCase {
         var presses = 0
         card.onActivate = { presses += 1 }
         XCTAssertEqual(card.accessibilityRole(), .button)
+        XCTAssertEqual(card.accessibilityLabel(), "Source a")
+        XCTAssertEqual(card.accessibilityValue() as? String, "Playing fullscreen. Live")
+        XCTAssertFalse(card.isAccessibilitySelected(), "Playing does not implicitly change browse selection")
+        card.isSelected = true
+        XCTAssertTrue(card.isAccessibilitySelected())
         // NSButton dispatches the native press but can return false in the
         // inactive XCTest host. The observable contract is one activation.
         _ = card.accessibilityPerformPress()
@@ -180,6 +278,25 @@ final class SourceBrowserTests: XCTestCase {
             charactersIgnoringModifiers: characters, isARepeat: false, keyCode: code))
     }
 
+    private func flushBrowserUpdates() async {
+        // The browser coalesces native notifications onto the next main turn.
+        // Two turns also drain work scheduled by layout during reconciliation.
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { DispatchQueue.main.async { continuation.resume() } }
+        }
+    }
+
+}
+
+/// The hosted test process cannot own foreground activation. Keep real window
+/// attachment/ordering and notifications, while supplying the two WindowServer
+/// observations needed to test lifecycle handling deterministically.
+@MainActor
+private final class PreviewVisibilityWindow: NSWindow {
+    var reportedOcclusion: NSWindow.OcclusionState = .visible
+    var reportedMiniaturized = false
+    override var occlusionState: NSWindow.OcclusionState { reportedOcclusion }
+    override var isMiniaturized: Bool { reportedMiniaturized }
 }
 
 @MainActor

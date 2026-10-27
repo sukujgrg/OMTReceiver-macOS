@@ -1,3 +1,68 @@
+# Core Audio teardown QoS repair — 28 October 2026
+
+The earlier native trace correctly located a synchronous wait inside `AVAudioPlayerNode.stop()`, but stopping at the framework stack missed two app-side causes: `AudioPlayer` classified its non-real-time graph-control queue as `.userInteractive`, and its finalizer could call native stop directly on the main/UI thread.
+
+The same private serial queue now explicitly uses `.default` QoS for graph construction, PCM submission, volume, reset and retirement. `AVAudioEngine` still owns the real-time render thread; that thread's scheduling is unchanged. At final `AudioPlayer` release, graph ownership transfers to the original control queue, which performs native stop and the graph's final ARC release. No separate overlapping teardown queue was added. Both source/render generation fences, the admission lock, scheduled-duration bounds, native player/engine stop calls and old-stop-before-replacement order remain intact. No diagnostic, checker setting or warning was suppressed. This classification follows [Apple's guidance for APIs with internal synchronization](https://developer.apple.com/documentation/xcode/diagnosing-performance-issues-early).
+
+Two new regressions verify actual execution and ownership rather than a queue property's declared value:
+
+- UI-originated graph operations, explicit stop, last-owner release and renderer destruction execute off the main thread at effective default QoS. The test waits for temporary control-operation retains to finish before dropping the sole player reference on MainActor. The initial run against the old implementation failed, observing UI QoS and final native stop on the main thread.
+- A deliberately blocked old renderer stop keeps UI cancellation/admission responsive, prevents replacement graph creation from overtaking retirement, rejects a canceled intermediate source and preserves the admitted replacement's mute state.
+
+All **12 focused audio tests** passed, including real output-mixer signal, mute/silence, unmute and `.dataPlayedBack` completion. `make test` passed **88 native tests, zero failures, one expected optional eucaly skip**, plus **111 offline release/feed checks**. After strengthening the sole-reference regression, the complete native suite passed again with the same counts. Xcode's structured final result reports `runtimeWarnings: []`; the logs contain no teardown priority-inversion diagnostic. The Thread Performance Checker settings are unchanged.
+
+Final native result: `build/DerivedData/Logs/Test/Test-OMTReceiver-2026.10.28_04-47-09-+1100.xcresult`. Evidence: `build/Logs/audio-qos-regression-before-fix.log`, `audio-qos-focused-after-fix.log`, `audio-qos-full-suite-final.log`, `audio-qos-native-suite-final.log` and `audio-qos-final-result-summary.json`. The original symbolication evidence remains in `build/Logs/audio-stop-priority-investigation.txt`; its recommendation to leave the warning unresolved is superseded by this repair.
+
+`make build` archived/exported signed **1.2.1 / 261027.174803** into `~/Applications/OMTReceiver.app`; strict deep signature verification passed. Build log: `build/Logs/audio-qos-signed-build.log`. The installed bundle is updated; an already-running receiver needs relaunching to load the new code. No active operator playback was interrupted for this follow-up.
+
+No new physical speaker, device-route-removal, sustained-load or A/V timing qualification is claimed. The real Core Audio graph regression verifies rendered samples and playback completion through the current output route.
+
+---
+
+# Version 1.2.1 verification follow-up — 28 October 2026
+
+The earlier repair commit `19fb860` already addresses the nine review findings through display ownership, per-track media health, native control presentation, PCM admission, recovered renderer state, accessible Settings, native button tracking, deliberate preview retry and safe-area geometry. This follow-up independently checked those changes and repaired the remaining lifecycle gaps.
+
+## Additional root repairs
+
+- Full-quality fullscreen output now owns a scoped Foundation `ProcessInfo.beginActivity(options:reason:)` activity using `[.userInitiated, .idleDisplaySleepDisabled]`, paired with `endActivity(_:)`. No synthetic input, repeated timer, power-setting change or helper process is used to keep the Mac awake. Controls and repeat activation retain one scope; retargeting preserves it; replacement acquires its scope before the displaced receiver releases its scope; exit, missing-target failure and controller retirement release it. This follows Apple's presentation example in `NSProcessInfo.h` and [Foundation activity documentation](https://developer.apple.com/documentation/foundation/processinfo/activityoptions).
+- The source browser explicitly observes minimize/restore and view hide/unhide, alongside window occlusion, so preview retirement does not depend on a coincident WindowServer notification.
+- Source buttons expose accessible browse selection independently from their Playing value.
+- Show Sources uses the same application-level controls resolver as Settings and connection dialogs. It can reveal a browser covered by another receiver's projection without stopping that receiver. The regression checks source/surface preservation, focus and window ordering on the two connected displays.
+
+## Automated evidence
+
+The final serial run executed **86 native tests, zero failures, one expected optional eucaly skip**. The optional isolated eucaly sender was not started again for this follow-up; its previous successful run is preserved below. The **111 offline release/feed checks** passed. No build overlapped the implementation chat's validation.
+
+New regressions cover activity lifetime and handoff ordering, presentation-option restoration in both display exit orders, cross-window Show Sources, visible/occluded/minimized/hidden preview transitions with pending-worker retirement, source identity through Playing changes and discovery reorder, responder-chain arrow/Return routing, accessible selection, native popup-cell values, mute without fresh input, matching versus unrelated audio configuration changes, and real Core Audio rendering.
+
+The real audio test sends generated 48 kHz stereo PCM through the shipped `CoreAudioRenderer` and `AudioPlayer`. A tap on the app's own output mixer observes nonzero signal, muted silence and restored signal after unmute; actual `.dataPlayedBack` callbacks must complete, and mute must retain the same running graph. It requires an output route and uses no microphone. This establishes digital graph output, not audible speaker quality.
+
+The first follow-up run exposed an incorrect test assumption: the outer `NSPopUpButton` is ignored in AppKit's accessibility hierarchy; its native cell exposes the selection value. The corrected regression uses `NSAccessibility.unignoredDescendant(of:)`, verifies the popup role/value and confirms AppKit updates the value after selection changes. No application AX-value workaround was introduced.
+
+This run reported a Thread Performance Checker priority-inversion diagnostic during `AVAudioPlayerNode.stop()`. Symbolication identified Apple's internal timer cancellation (`AVAEDispatchQueueTimer::CancelTimer` through `AVAudioPlayerNodeImpl::StopImpl`) synchronizing with its default-QoS timer queue. Test tap removal completed beforehand. The subsequent Core Audio QoS repair above corrects the app-side queue classification and final-release path; the warning is no longer present. Historical investigation: `build/Logs/audio-stop-priority-investigation.txt`.
+
+Final test result: `build/DerivedData/Logs/Test/Test-OMTReceiver-2026.10.28_04-29-37-+1100.xcresult`. Logs: `build/Logs/review-followup-native-tests-routing-final.log` and `build/Logs/review-followup-offline.log`. Earlier diagnostic runs are retained.
+
+## Signed build and native observation
+
+`make build` archived/exported the signed **1.2.1 / 261027.173021** app into `~/Applications/OMTReceiver.app`. `codesign --verify --deep --strict` passed using normal macOS trust services. Build log: `build/Logs/review-followup-signed-build-final.log`. No commit, push or release was performed by this follow-up.
+
+Two bounded, isolated official-SDK fixtures supplied distinct moving 1280×720p60 sources with stereo 48 kHz PCM. No operator sender app or library was modified. Native UI verification on the preceding signed build `261027.172339` observed:
+
+- Moving full-quality pixels on the connected DELL P2721Q's 3840×2160 backing surface, with the marker in different positions in consecutive captures. The browser was moved onto that display to bring the existing output key for direct capture, then returned to DELL U3223QE.
+- Arrow browsing without starting output, Return and Space activation, Escape and Command-W stopping output and restoring collection focus, and repeated activation retaining output.
+- Two receiver windows exchanging ownership of the configured display, with the displaced browser returning to Sources and each browser retaining its own mute state.
+- Show Sources and a canceled Connect to Address sheet retaining Playing. Native Settings exposed the named Playback popup controls.
+
+The final build adds only the cross-window Sources resolver repair to that tested application behavior. Its native minimize/restore check recorded the fixture's actual preview connection count changing **1 → 0 → 1**. The final cross-window Sources case passed its native AppKit regression; further interactive checks were stopped when live operator interaction with the receiver was observed, preserving the current output.
+
+Read-only `pmset -g assertions` confirmed an OMTReceiver-owned **PreventUserIdleDisplaySleep** and **PreventUserIdleSystemSleep** assertion named “Receiving fullscreen OMT video and audio” during output. After Escape, the app's assertions disappeared and the display assertion count was zero. The final installed build's active output also held the same assertions. Evidence is under `build/native-verification/assertions-*.txt`; the fixture's connection ledger is `build/native-verification/fixture-final.log`. Both isolated senders retired cleanly. The app was left running with the operator's current Test Pattern output intact.
+
+Physical cable unplug, actual idle-timeout/screen-saver transitions, explicit sleep/wake, camera-housing hardware, audio device removal/route changes, audible speaker quality, sustained 12-source load and measured end-to-end A/V synchronization remain unqualified. The scoped native activity and its OS assertions were verified; they do not override explicit system sleep. Full VoiceOver navigation was not performed in this follow-up.
+
+---
+
 # Version 1.2.1 independent review — 28 October 2026
 
 A separate fresh chat reviewed the original `ed7c7a0` app independently against current Apple guidance and inspected the installed UI. Separate engineering reviews checked media lifetimes, buffering, discovery and tests. Follow-up review found no remaining blocking issue in the repaired ownership, control presentation, retry, error-health and geometry paths. This is bounded qualification, not a promise that every hardware/network combination is issue-free.
