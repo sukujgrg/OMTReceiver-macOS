@@ -29,6 +29,58 @@ final class TransportValidationTests: XCTestCase {
         }
     }
 
+    func testUSBCameraRationalRateIsAcceptedForFullVideoAndReducedPreviews() {
+        for (width, height, flags) in [(1280, 720, 0), (1920, 1080, 0), (160, 90, 8), (240, 135, 8)] {
+            video(width: Int32(width), height: Int32(height), stride: Int32(width * 2),
+                  flags: Int32(flags), bytes: width * height * 2) { raw in
+                var camera = raw
+                camera.frameRateN = 3_000_003; camera.frameRateD = 100_000
+                let accepted = ReceiverSession.validatedVideo(camera, receivedAt: 42)
+                XCTAssertNotNil(accepted, "Valid camera rate must work in both playback and preview")
+                XCTAssertEqual(accepted?.frameRateN, 3_000_003)
+                XCTAssertEqual(accepted?.frameRateD, 100_000)
+                XCTAssertEqual(accepted?.timestamp, raw.timestamp)
+                XCTAssertEqual(accepted?.width, width)
+                XCTAssertEqual(accepted?.height, height)
+                XCTAssertEqual(accepted?.flags, flags)
+            }
+        }
+    }
+
+    func testLargeValidRationalTermsArePreservedWithoutRescaling() {
+        let rates: [(Int32, Int32)] = [(60_000_000, 2_000_000), (Int32.max, Int32.max)]
+        video(width: 32, height: 16, stride: 64, bytes: 64 * 16) { raw in
+            for (numerator, denominator) in rates {
+                var camera = raw
+                camera.frameRateN = numerator; camera.frameRateD = denominator
+                let accepted = ReceiverSession.validatedVideo(camera, receivedAt: 0)
+                XCTAssertNotNil(accepted)
+                XCTAssertEqual(accepted?.frameRateN, Int(numerator))
+                XCTAssertEqual(accepted?.frameRateD, Int(denominator))
+                XCTAssertEqual(accepted?.framesPerSecond, Double(numerator) / Double(denominator))
+            }
+        }
+    }
+
+    func testRateLimitUsesRatioAndStillRejectsInvalidTerms() {
+        video(width: 32, height: 16, stride: 64, bytes: 64 * 16) { raw in
+            let invalidRates: [(Int32, Int32)] = [
+                (0, 1), (1, 0), (-1, 1), (1, -1),
+                (Int32.min, 1), (1, Int32.min), (Int32.max, 1),
+                (240_000_001, 1_000_000)
+            ]
+            for (numerator, denominator) in invalidRates {
+                var invalid = raw
+                invalid.frameRateN = numerator; invalid.frameRateD = denominator
+                XCTAssertNil(ReceiverSession.validatedVideo(invalid, receivedAt: 0),
+                             "Invalid rate \(numerator)/\(denominator) must remain rejected")
+            }
+            var boundary = raw
+            boundary.frameRateN = 240_000_000; boundary.frameRateD = 1_000_000
+            XCTAssertEqual(ReceiverSession.validatedVideo(boundary, receivedAt: 0)?.framesPerSecond, 240)
+        }
+    }
+
     func testSDKUYVAAlphaPlaneIsRequiredAndOwned() {
         var saved: VideoFrame?
         video(codec: 0x41565955, flags: 2, bytes: 3840 * 1080 + 1920 * 1080) { raw in

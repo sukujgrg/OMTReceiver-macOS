@@ -196,8 +196,10 @@ final class ReceiverSession {
         let width = Int(frame.width), height = Int(frame.height), stride = Int(frame.stride)
         let isPreview = frame.flags & 8 != 0
         let minimumDimension = isPreview ? 2 : 16
+        // OMT rate terms are signed 32-bit fields. Bound the resulting rate,
+        // not each term: USB cameras legitimately report 3000003/100000.
         guard (minimumDimension...8192).contains(width), (minimumDimension...8192).contains(height),
-              (1...1_000_000).contains(frame.frameRateN), (1...1_000_000).contains(frame.frameRateD),
+              frame.frameRateN > 0, frame.frameRateD > 0,
               Double(frame.frameRateN) / Double(frame.frameRateD) <= 240,
               stride > 0, stride <= 131072, let data = frame.data else { return nil }
         let minimumRow: Int
