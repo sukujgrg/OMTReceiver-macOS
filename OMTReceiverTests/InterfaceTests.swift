@@ -127,7 +127,11 @@ final class InterfaceTests: XCTestCase {
         Preferences.shared.fullscreenDisplayID = ""
         defer { Preferences.shared.fullscreenDisplayID = saved }
         let home = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 360))
-        let owner = NSWindow(contentRect: home.frame, styleMask: [.titled], backing: .buffered, defer: false)
+        let screen = try XCTUnwrap(DisplayCatalog.mainScreen)
+        let visible = screen.visibleFrame
+        let content = NSRect(x: visible.minX - screen.frame.minX + 20, y: visible.minY - screen.frame.minY + 20,
+                             width: 640, height: 360)
+        let owner = NSWindow(contentRect: content, styleMask: [.titled], backing: .buffered, defer: false, screen: screen)
         owner.isReleasedWhenClosed = false; owner.contentView = home
         let video = VideoView(frame: home.bounds); home.addSubview(video)
         let controller = FullscreenController(owner: owner, home: home, video: video)
