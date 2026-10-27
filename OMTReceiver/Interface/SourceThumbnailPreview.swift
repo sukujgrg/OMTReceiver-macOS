@@ -20,35 +20,6 @@ extension SourceThumbnailPreviewing {
     func retry() {}
 }
 
-/// Evaluated by the session's existing health updates, without another timer.
-/// Successful video resets the delay; failed connection attempts retain it.
-struct PreviewReconnectBackoff {
-    private var nextDelay: TimeInterval = 1
-    private var retryAt: TimeInterval?
-
-    mutating func shouldReconnect(videoState: ReceiverMediaHealth.VideoState, at time: TimeInterval) -> Bool {
-        switch videoState {
-        case .live:
-            reset()
-        case .waiting, .unsupported:
-            retryAt = nil
-        case .stalled:
-            guard let retryAt else {
-                self.retryAt = time + nextDelay
-                return false
-            }
-            if time >= retryAt {
-                self.retryAt = nil
-                nextDelay = min(30, nextDelay * 2)
-                return true
-            }
-        }
-        return false
-    }
-
-    mutating func reset() { nextDelay = 1; retryAt = nil }
-}
-
 @MainActor
 final class SourceThumbnailPreview: SourceThumbnailPreviewing {
     let source: OMTSource
@@ -59,7 +30,7 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
     private var rendererError: String?
     private var started = false
     private var stopped = false
-    private var reconnectBackoff = PreviewReconnectBackoff()
+    private var reconnectBackoff = ReceiverReconnectBackoff()
     private var preferenceObserver: NSObjectProtocol?
 
     var statusText: String { rendererError ?? session.statusText }
@@ -117,8 +88,8 @@ final class SourceThumbnailPreview: SourceThumbnailPreviewing {
 
     private func sessionChanged() {
         guard started, !stopped else { return }
-        let state = session.isTerminalFailure ? ReceiverMediaHealth.VideoState.unsupported : session.videoState
-        if reconnectBackoff.shouldReconnect(videoState: state, at: ProcessInfo.processInfo.systemUptime) {
+        let state = session.isTerminalFailure ? ReceiverMediaHealth.State.unsupported : session.videoState
+        if reconnectBackoff.shouldReconnect(state: state, at: ProcessInfo.processInfo.systemUptime) {
             restart()
         } else {
             onChange?()

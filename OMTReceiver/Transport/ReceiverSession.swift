@@ -13,58 +13,6 @@ private final class ReceiveCancellation: @unchecked Sendable {
     }
 }
 
-/// Track health follows each media channel independently. A healthy audio
-/// channel must not conceal a frozen picture (or the reverse). Tracks that a
-/// sender has never supplied remain optional, including audio-only sources.
-struct ReceiverMediaHealth {
-    enum VideoState: Equatable, Sendable { case waiting, live, stalled, unsupported }
-    struct Snapshot: Equatable {
-        let status: String
-        let format: String?
-        let videoState: VideoState
-    }
-    static let signalTimeout: TimeInterval = 3
-    private let startedAt: TimeInterval
-    private var lastVideo: TimeInterval?
-    private var lastAudio: TimeInterval?
-    private var videoFormat: String?
-    private var videoTimeout = Self.signalTimeout
-    private var audioFormat: String?
-    private var invalidVideo: (time: TimeInterval, format: String)?
-
-    init(startedAt: TimeInterval) { self.startedAt = startedAt }
-
-    mutating func receivedVideo(format: String, at time: TimeInterval, timeout: TimeInterval = Self.signalTimeout) {
-        lastVideo = time; videoFormat = format; invalidVideo = nil
-        videoTimeout = max(Self.signalTimeout, timeout)
-    }
-    mutating func receivedAudio(format: String, at time: TimeInterval) {
-        lastAudio = time; audioFormat = format
-    }
-    mutating func rejectedVideo(format: String, at time: TimeInterval) {
-        invalidVideo = (time, format)
-    }
-    func snapshot(at time: TimeInterval) -> Snapshot? {
-        func fresh(_ last: TimeInterval?, timeout: TimeInterval = Self.signalTimeout) -> Bool {
-            last.map { time - $0 <= timeout } ?? false
-        }
-        if let invalidVideo, fresh(invalidVideo.time) {
-            return Snapshot(status: "Unsupported or invalid video format", format: invalidVideo.format, videoState: .unsupported)
-        }
-        let videoLive = fresh(lastVideo, timeout: videoTimeout), audioLive = fresh(lastAudio)
-        if videoLive {
-            return Snapshot(status: lastAudio != nil && !audioLive ? "Audio lost — video live" : "Live", format: videoFormat, videoState: .live)
-        }
-        if lastVideo != nil || invalidVideo != nil {
-            return Snapshot(status: audioLive ? "Video lost — audio live" : "Signal lost — reconnecting…", format: videoFormat ?? invalidVideo?.format, videoState: .stalled)
-        }
-        if audioLive { return Snapshot(status: "Live Audio", format: audioFormat, videoState: .waiting) }
-        if lastAudio != nil { return Snapshot(status: "Signal lost — reconnecting…", format: audioFormat, videoState: .waiting) }
-        if time - startedAt >= Self.signalTimeout { return Snapshot(status: "Waiting for sender…", format: nil, videoState: .stalled) }
-        return nil
-    }
-}
-
 @MainActor
 final class ReceiverSession {
     /// Browsing uses the SDK's reduced-resolution video channel. It never
@@ -77,14 +25,18 @@ final class ReceiverSession {
     private(set) var statusText = "Choose a source"
     private(set) var formatText = ""
     private(set) var isTerminalFailure = false
-    private(set) var videoState: ReceiverMediaHealth.VideoState = .waiting
+    private(set) var videoState: ReceiverMediaHealth.State = .waiting
     var onChange: (() -> Void)?
+    /// The old receiver's media admission is cancelled before owners reset
+    /// their playback queues. The selected source and presentation stay active.
+    var onReconnect: (() -> Void)?
     private let video: @Sendable (VideoFrame) -> Void
     private let audio: @Sendable (AudioFrame) -> Void
     private let mode: Mode
     private let queue: DispatchQueue
     private var cancellation: ReceiveCancellation?
     private var generation = UUID()
+    private var reconnectBackoff = ReceiverReconnectBackoff()
 
     init(video: @escaping @Sendable (VideoFrame) -> Void,
          audio: @escaping @Sendable (AudioFrame) -> Void,
@@ -95,6 +47,11 @@ final class ReceiverSession {
     }
 
     func connect(_ selected: OMTSource) {
+        reconnectBackoff.reset()
+        beginConnection(selected)
+    }
+
+    private func beginConnection(_ selected: OMTSource) {
         cancellation?.cancel()
         let cancellation = ReceiveCancellation(); self.cancellation = cancellation
         let token = UUID(); generation = token
@@ -102,15 +59,24 @@ final class ReceiverSession {
         isTerminalFailure = false; videoState = .waiting
         onChange?()
         let video = self.video, audio = self.audio, mode = self.mode
-        let update: @Sendable (String, String?, Bool, ReceiverMediaHealth.VideoState) -> Void = { [weak self] status, format, terminal, videoState in
+        let update: @Sendable (ReceiverMediaHealth.Snapshot, Bool) -> Void = { [weak self] snapshot, terminal in
             // The receive queue produces an ordered stream of state changes;
             // preserve that order while crossing onto the main actor.
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == token else { return }
-                self.statusText = status
+                self.statusText = snapshot.status
                 self.isTerminalFailure = terminal
-                self.videoState = videoState
-                if let format { self.formatText = format }
+                self.videoState = snapshot.videoState
+                if let format = snapshot.format { self.formatText = format }
+                if mode == .playback, !terminal,
+                   self.reconnectBackoff.shouldReconnect(state: snapshot.connectionState, at: ProcessInfo.processInfo.systemUptime) {
+                    self.cancellation?.cancel()
+                    self.onReconnect?()
+                    // A reset observer can stop or select another source.
+                    guard self.generation == token else { return }
+                    self.beginConnection(selected)
+                    return
+                }
                 self.onChange?()
             }
         }
@@ -126,6 +92,7 @@ final class ReceiverSession {
 
     func disconnect() {
         cancellation?.cancel(); cancellation = nil; generation = UUID()
+        reconnectBackoff.reset()
         source = nil; statusText = "Disconnected"; formatText = ""; isTerminalFailure = false; videoState = .waiting; onChange?()
     }
 
@@ -140,11 +107,16 @@ final class ReceiverSession {
 
     nonisolated private static func runReceiver(source: OMTSource, mode: Mode, cancellation: ReceiveCancellation,
         video: @escaping @Sendable (VideoFrame) -> Void, audio: @escaping @Sendable (AudioFrame) -> Void,
-        update: @escaping @Sendable (String, String?, Bool, ReceiverMediaHealth.VideoState) -> Void) {
-        if let error = OMTSDKRuntime.shared.load() { update(error, nil, true, .waiting); return }
+        update: @escaping @Sendable (ReceiverMediaHealth.Snapshot, Bool) -> Void) {
+        if let error = OMTSDKRuntime.shared.load() {
+            update(.init(status: error, format: nil, videoState: .waiting, connectionState: .waiting), true); return
+        }
         guard !cancellation.isCancelled else { return }
         let preview: Int32 = mode == .preview ? 1 : 0
-        guard let handle = omtr_receiver_create_mode(source.address, preview) else { update("The OMT SDK could not create this receiver. Try Reconnect.", nil, true, .waiting); return }
+        guard let handle = omtr_receiver_create_mode(source.address, preview) else {
+            update(.init(status: "The OMT SDK could not create this receiver. Try Reconnect.", format: nil,
+                         videoState: .waiting, connectionState: .waiting), true); return
+        }
         defer { omtr_receiver_destroy(handle) }
         var health = ReceiverMediaHealth(startedAt: ProcessInfo.processInfo.systemUptime)
         var lastStatus: TimeInterval = 0
@@ -164,7 +136,8 @@ final class ReceiverSession {
                         // the instance rather than repeatedly decoding/copying it.
                         if mode == .preview, frame.flags & 8 == 0 {
                             previewUnavailable = true
-                            update("Preview unavailable", "This sender did not provide reduced-resolution video.", true, .unsupported)
+                            update(.init(status: "Preview unavailable", format: "This sender did not provide reduced-resolution video.",
+                                         videoState: .unsupported, connectionState: .unsupported), true)
                             return
                         }
                         // The SDK owns decoding. Avoid copying and queueing every
@@ -173,7 +146,7 @@ final class ReceiverSession {
                             return
                         }
                         if let owned = validatedVideo(frame, receivedAt: now) {
-                            let timeout = mode == .preview ? max(ReceiverMediaHealth.signalTimeout, 2 / owned.framesPerSecond) : ReceiverMediaHealth.signalTimeout
+                            let timeout = max(ReceiverMediaHealth.signalTimeout, 2 / owned.framesPerSecond)
                             health.receivedVideo(format: owned.summary, at: now, timeout: timeout)
                             if mode == .preview { lastPreviewAdmission = now }
                             cancellation.admit { video(owned) }
@@ -191,9 +164,8 @@ final class ReceiverSession {
             if let snapshot = health.snapshot(at: now), snapshot != lastSnapshot || now - lastStatus >= 1 {
                 lastSnapshot = snapshot; lastStatus = now
                 // The SDK handles normal reconnects and virtual-source redirects.
-                // A preview owner can replace a connection that stops delivering
-                // video while its underlying TCP socket remains open.
-                update(snapshot.status, snapshot.format, false, snapshot.videoState)
+                // Health updates also permit recovery of half-open connections.
+                update(snapshot, false)
             }
         }
     }
@@ -254,7 +226,7 @@ final class ReceiverSession {
     }
 
     nonisolated private static func runPattern(mode: Mode, cancellation: ReceiveCancellation,
-        video: @escaping @Sendable (VideoFrame) -> Void, update: @escaping @Sendable (String, String?, Bool, ReceiverMediaHealth.VideoState) -> Void) {
+        video: @escaping @Sendable (VideoFrame) -> Void, update: @escaping @Sendable (ReceiverMediaHealth.Snapshot, Bool) -> Void) {
         let width = mode == .preview ? 320 : 1280
         let height = mode == .preview ? 180 : 720
         let rate: Int64 = mode == .preview ? 15 : 60
@@ -287,7 +259,7 @@ final class ReceiverSession {
                     flags: mode == .preview ? 10 : 2, frameRateN: Int(rate), frameRateD: 1, aspectRatio: 16.0/9.0, colorSpace: 709,
                     timestamp: index * 10_000_000 / rate, receivedAt: ProcessInfo.processInfo.systemUptime, data: data)
                 cancellation.admit { video(frame) }
-                if index == 0 { update("Test Pattern", frame.summary, false, .live) }
+                if index == 0 { update(.init(status: "Test Pattern", format: frame.summary, videoState: .live, connectionState: .live), false) }
             }
             index += 1
             let remaining = start + Double(index) / Double(rate) - ProcessInfo.processInfo.systemUptime

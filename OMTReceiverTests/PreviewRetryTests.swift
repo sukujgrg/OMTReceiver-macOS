@@ -5,63 +5,63 @@ import XCTest
 @MainActor
 final class PreviewRetryTests: XCTestCase {
     func testAutomaticRetryBackoffIsBoundedAcrossUnsuccessfulConnections() {
-        var backoff = PreviewReconnectBackoff()
+        var backoff = ReceiverReconnectBackoff()
         for (attempt, delay) in [1.0, 2, 4, 8, 16, 30, 30].enumerated() {
             let stalledAt = Double(attempt) * 100
-            XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: stalledAt))
-            XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: stalledAt + delay - 0.001))
-            XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: stalledAt + delay),
+            XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: stalledAt))
+            XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: stalledAt + delay - 0.001))
+            XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: stalledAt + delay),
                           "A continuously unavailable sender must back off without exceeding the 30-second delay")
-            XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: stalledAt + delay + 0.001),
+            XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: stalledAt + delay + 0.001),
                            "Starting the next connection must not reset consecutive-failure backoff")
         }
     }
 
-    func testReceivingVideoCancelsPendingRetryAndResetsBackoff() {
-        var backoff = PreviewReconnectBackoff()
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 1))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 1.1))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 2))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .live, at: 3))
+    func testLiveMediaCancelsPendingRetryAndResetsBackoff() {
+        var backoff = ReceiverReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 0))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 1))
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 1.1))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 2))
+        XCTAssertFalse(backoff.shouldReconnect(state: .live, at: 3))
         for time in [4.0, 10, 30, 100] {
-            XCTAssertFalse(backoff.shouldReconnect(videoState: .live, at: time),
+            XCTAssertFalse(backoff.shouldReconnect(state: .live, at: time),
                            "Healthy frame arrivals must never cause periodic receiver resets")
         }
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101.999))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 102),
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 101))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 101.999))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 102),
                       "A new loss after successful reception starts with the initial delay")
     }
 
-    func testWaitingAndUnsupportedVideoCancelObsoleteRetryDeadlines() {
-        var backoff = PreviewReconnectBackoff()
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 0.5))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 2))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .unsupported, at: 3))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 4))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 5))
+    func testWaitingAndUnsupportedMediaCancelObsoleteRetryDeadlines() {
+        var backoff = ReceiverReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 0))
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 0.5))
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 2))
+        XCTAssertFalse(backoff.shouldReconnect(state: .unsupported, at: 3))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 4))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 5))
 
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 5.1))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .unsupported, at: 6))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 10))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 11))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 12),
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 5.1))
+        XCTAssertFalse(backoff.shouldReconnect(state: .unsupported, at: 6))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 10))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 11))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 12),
                       "A connecting or unsupported source must not silently clear failure history")
     }
 
     func testExplicitResetDiscardsThePendingAutomaticRetry() {
-        var backoff = PreviewReconnectBackoff()
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 0))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 1))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 1.1))
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 2))
+        var backoff = ReceiverReconnectBackoff()
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 0))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 1))
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 1.1))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 2))
         backoff.reset()
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .waiting, at: 100),
+        XCTAssertFalse(backoff.shouldReconnect(state: .waiting, at: 100),
                        "A stopped or manually restarted preview must not retain an old retry deadline")
-        XCTAssertFalse(backoff.shouldReconnect(videoState: .stalled, at: 101))
-        XCTAssertTrue(backoff.shouldReconnect(videoState: .stalled, at: 102))
+        XCTAssertFalse(backoff.shouldReconnect(state: .stalled, at: 101))
+        XCTAssertTrue(backoff.shouldReconnect(state: .stalled, at: 102))
     }
 
     func testOnlyActiveFailedPreviewCanRetryWithoutBypassingRetirementBudget() {

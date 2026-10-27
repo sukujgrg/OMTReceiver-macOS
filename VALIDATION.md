@@ -1,3 +1,15 @@
+# Sender stop/start recovery — 28 October 2026
+
+Full-quality playback now falls back to recreating its own SDK receiver after sustained complete media loss. The existing per-session health updates drive bounded retry delays; no reachability monitor or SDK-wide restart is used. Discovered source names are resolved again, including an iPhone sender restarting its listener on a different port. Any continuing valid video or audio prevents a full receiver reset. Preview and playback recovery share the same small backoff policy while retaining independent workers and media-health criteria.
+
+Before replacement, cancellation fences old frame admission. The playback owner clears queued audio and pending video, resets the playback epoch, and retains the last displayed picture, fullscreen window, selected source and mute preference. Stop, Escape, source selection and shutdown cancel pending recovery. Manual addresses continue targeting their specified host/port.
+
+The new real-SDK half-open playback regression failed with recovery disabled: after ten seconds it still had only its original two connections and reported signal loss. With recovery enabled, the complete native suite passed **117 tests, zero failures, one optional eucaly skip**, plus **118 offline checks**. New coverage exercises named sender stop/start on a different port with reset video/audio timestamps, independent concurrent playback, stop during backoff, synchronous disconnect from the recovery callback, last-picture/queue handling and fullscreen/mute retention. The named restart test was strengthened afterward to require three fresh frames on both channels and a distinct timestamp epoch; its focused rerun passed. These are controlled SDK/network tests, not a physical iPhone qualification.
+
+The final fullscreen fixture explicitly stops independent thumbnail reception before counting output connections; its recovery/Escape regression passed with normal AppKit browser visibility. Evidence: `build/Logs/playback-recovery-before-fix.log`, `playback-recovery-native-final.log`, `playback-recovery-strengthened-tests.log`, `playback-recovery-interface-final.log` and `playback-recovery-offline.log`.
+
+---
+
 # Stalled preview recovery — 28 October 2026
 
 Preview recovery now responds to typed video health from the existing receiver health updates. A stalled thumbnail reopens only its own SDK receiver, with bounded retry delays from 1 to 30 seconds; fresh video resets the delay. Manual Retry Preview is enabled during signal loss as well as terminal failure. Cancellation fences old frame admission before clearing, and the existing serial worker destroys the previous receiver before replacement. Retirement cancels recovery, including a synchronous stop from a state-change observer. Full-quality video/audio reception and the SDK's normal reconnect behavior are unchanged.

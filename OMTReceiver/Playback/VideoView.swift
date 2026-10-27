@@ -112,6 +112,13 @@ final class VideoView: MTKView, MTKViewDelegate, @unchecked Sendable {
         publishFrameError(nil)
     }
 
+    /// Drop the previous receive epoch's queued pictures while holding the last
+    /// displayed picture until the sender resumes with a fresh timestamp epoch.
+    func prepareForReconnect() {
+        mailbox.clear()
+        clock.reset()
+    }
+
     func configure(deinterlace: DeinterlaceMode, fieldOrder: FieldOrder,
                    background: VideoBackground) {
         self.deinterlace = deinterlace; self.fieldOrder = fieldOrder

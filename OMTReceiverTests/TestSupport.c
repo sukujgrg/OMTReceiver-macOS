@@ -18,6 +18,7 @@ static omt_send_t *(*create_sender)(const char *, OMTQuality);
 static void (*destroy_sender)(omt_send_t *);
 static int (*send_frame)(omt_send_t *, OMTMediaFrame *);
 static int (*sender_connections)(omt_send_t *);
+static int (*sender_address)(omt_send_t *, char *, int);
 void *test_sender_create(const char *libraryPath, int port) {
     void *library = dlopen(libraryPath, RTLD_NOW | RTLD_LOCAL);
     if (!library) return NULL;
@@ -25,6 +26,7 @@ void *test_sender_create(const char *libraryPath, int port) {
     destroy_sender = dlsym(library, "omt_send_destroy");
     send_frame = dlsym(library, "omt_send");
     sender_connections = dlsym(library, "omt_send_connections");
+    sender_address = dlsym(library, "omt_send_getaddress");
     void (*setting)(const char *, int) = dlsym(library, "omt_settings_set_integer");
     if (!create_sender || !destroy_sender || !send_frame || !sender_connections || !setting) return NULL;
     setting("NetworkPortStart", port); setting("NetworkPortEnd", port);
@@ -32,6 +34,9 @@ void *test_sender_create(const char *libraryPath, int port) {
 }
 void test_sender_destroy(void *sender) { if (sender) destroy_sender(sender); }
 int test_sender_connections(void *sender) { return sender && sender_connections ? sender_connections(sender) : 0; }
+int test_sender_address(void *sender, char *address, int capacity) {
+    return sender && sender_address ? sender_address(sender, address, capacity) : 0;
+}
 int test_sender_video(void *sender, int width, int height, int interlaced, int alpha, int highDepth, long long timestamp) {
     size_t pixels = (size_t)width * height;
     size_t count = pixels * (highDepth ? (alpha ? 6 : 4) : 4);

@@ -50,7 +50,7 @@ This is a connection/rendering budget, not a guaranteed throughput or total-memo
 
 **Connect to Address…** accepts the sender's actual TCP address, for example `omt://192.168.1.20:6400`, `sender.local:6500`, or `omt://[::1]:6400`, and opens it fullscreen. No fixed sender port is assumed. Discovery never selects an output for you, and a playing source remains represented if its advertisement temporarily disappears.
 
-The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. **Playback → Reconnect** creates a fresh full-quality receiver; **Playback → Stop Output** stops that output. The silent browser previews remain independent. Video and audio freshness are tracked separately, so continuing audio cannot conceal frozen video (or the reverse).
+The status strip shows the full-quality output's connection state and format. Source loss retains the last output picture while the official SDK reconnects. If both video and audio remain unavailable, the app automatically reopens that receiver with bounded retry delays, resolving a discovered source's name again. This handles senders such as iPhone cameras that restart on a different TCP port. The fullscreen window and mute setting stay in place; continuing audio-only or video-only reception is preserved. **Playback → Reconnect** tries immediately; **Playback → Stop Output** stops that output and cancels retries. Silent browser previews remain independent. A manually entered address continues to target its specified host and port.
 
 ## Fullscreen and displays
 

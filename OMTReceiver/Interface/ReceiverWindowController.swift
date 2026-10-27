@@ -89,6 +89,11 @@ final class ReceiverWindowController: NSWindowController, NSWindowDelegate, NSTo
         sourceBrowser.onConnectAddress = { [weak self] in self?.connectAddress(nil) }
         sourceBrowser.onEscape = { [weak self] in self?.fullscreen.exit() }
         session.onChange = { [weak self] in self?.updateState() }
+        session.onReconnect = { [weak self] in
+            guard let self else { return }
+            self.audio.stop()
+            self.video.prepareForReconnect()
+        }
         preferenceObserver = NotificationCenter.default.addObserver(forName: .receiverPreferencesChanged, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.applyPreferences() }
         }

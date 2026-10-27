@@ -75,6 +75,33 @@ final class VideoHealthTests: XCTestCase {
         XCTAssertEqual(allocations, 1, "The retired source's queued frame must not allocate in the new epoch")
     }
 
+    func testReconnectRetainsDisplayedPictureButDiscardsQueuedOldEpoch() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let clock = PlaybackClock(latency: 0)
+        var allocations = 0
+        let view = VideoView(clock: clock, device: device) { device, bytes, count in
+            allocations += 1
+            return device.makeBuffer(bytes: bytes, length: count, options: .storageModeShared)
+        }
+        view.isPaused = true
+        view.enqueue(frame(width: 2, timestamp: 10_000_000))
+        XCTAssertTrue(view.prepareDueFrame(at: .infinity))
+        let displayed = try XCTUnwrap(view.displayedFormat)
+        view.enqueue(frame(width: 4, timestamp: 12_000_000))
+
+        view.prepareForReconnect()
+
+        XCTAssertEqual(view.displayedFormat, displayed, "A reconnect must hold the last good picture rather than black the output")
+        XCTAssertFalse(view.prepareDueFrame(at: .infinity), "Queued pictures from the retired receiver must be discarded")
+        XCTAssertEqual(allocations, 1, "Resetting reception must not allocate or present the queued old picture")
+        view.enqueue(frame(width: 6, timestamp: 0))
+        XCTAssertTrue(view.prepareDueFrame(at: CACurrentMediaTime() + 0.01))
+        XCTAssertNotEqual(view.displayedFormat, displayed)
+        XCTAssertTrue(view.displayedFormat?.contains("6 × 2") == true)
+        XCTAssertEqual(allocations, 2)
+        XCTAssertNil(view.errorMessage)
+    }
+
     func testClearCannotEraseFatalRendererInitializationFailure() {
         let view = VideoView(device: nil)
         view.isPaused = true
