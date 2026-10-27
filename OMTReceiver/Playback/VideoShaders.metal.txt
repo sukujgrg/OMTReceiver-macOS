@@ -1,0 +1,108 @@
+#include <metal_stdlib>
+using namespace metal;
+
+struct Uniforms {
+    uint4 dimensions; // width, height, byte stride, fourcc
+    int4 options;     // flags, color space, bob field (-1 means weave), background
+    float4 output;    // drawable width, height, display aspect
+};
+struct VertexOut { float4 position [[position]]; float2 uv; };
+vertex VertexOut omt_vertex(uint index [[vertex_id]]) {
+    constexpr float2 positions[] = { float2(-1,-1), float2(3,-1), float2(-1,3) };
+    float2 p = positions[index];
+    return {float4(p,0,1), float2((p.x+1)*.5, (1-p.y)*.5)};
+}
+
+float3 inverse709(float3 v) {
+    return select(pow(max((v + .099f) / 1.099f, 0.f), float3(1.f/.45f)),
+                  v / 4.5f, v < .081f);
+}
+float3 encodeSRGB(float3 v) {
+    v = max(v,0.f);
+    return select(1.055f * pow(v,float3(1.f/2.4f)) - .055f, 12.92f*v, v <= .0031308f);
+}
+uint word(device const uchar* bytes, uint offset) {
+    return uint(bytes[offset]) | (uint(bytes[offset+1]) << 8);
+}
+// Return linear-light premultiplied RGB, with explicit SDK plane strides.
+float4 pixel(device const uchar* bytes, constant Uniforms& u, int x, int y) {
+    uint width=u.dimensions.x, height=u.dimensions.y, stride=u.dimensions.z;
+    uint codec=u.dimensions.w;
+    x=clamp(x,0,int(width)-1); y=clamp(y,0,int(height)-1);
+    uint row=uint(y)*stride;
+    float3 rgb; float alpha=1;
+    if (codec==0x41524742u || codec==0x58524742u) { // BGRA / BGRX
+        uint p=row+uint(x)*4;
+        rgb=float3(bytes[p+2], bytes[p+1], bytes[p])/255.f;
+        if ((u.options.x & 2)!=0) alpha=float(bytes[p+3])/255.f;
+    } else {
+        float Y,U,V;
+        if (codec==0x36313250u || codec==0x36314150u) { // P216 / PA16
+            Y=(float(word(bytes,row+uint(x)*2))-4096.f)/56064.f;
+            uint uv=stride*height+row+(uint(x)/2)*4;
+            U=(float(word(bytes,uv))-32768.f)/57344.f;
+            V=(float(word(bytes,uv+2))-32768.f)/57344.f;
+            if (codec==0x36314150u && (u.options.x & 2)!=0)
+                alpha=float(word(bytes,stride*height*2+row+uint(x)*2))/65535.f;
+        } else { // UYVY / UYVA
+            uint p=row+(uint(x)/2)*4;
+            Y=(float(bytes[p+((x&1)==0 ? 1 : 3)])-16.f)/219.f;
+            U=(float(bytes[p])-128.f)/224.f;
+            V=(float(bytes[p+2])-128.f)/224.f;
+            if (codec==0x41565955u && (u.options.x & 2)!=0)
+                alpha=float(bytes[stride*height+uint(y)*(stride/2)+uint(x)])/255.f;
+        }
+        bool rec601=u.options.y==601 || (u.options.y==0 && height<720);
+        rgb=rec601 ? float3(Y+1.402f*V,Y-.344136f*U-.714136f*V,Y+1.772f*U)
+                   : float3(Y+1.5748f*V,Y-.187324f*U-.468124f*V,Y+1.8556f*U);
+    }
+    // SDK alpha may be straight or premultiplied in the encoded domain.
+    if ((u.options.x & 6)==6) rgb=alpha>0.00001f ? rgb/alpha : float3(0);
+    rgb=inverse709(max(rgb,0.f));
+    if (u.options.y==601 || (u.options.y==0 && height<720)) {
+        // SMPTE-C (SD Rec.601) primaries to Rec.709, in linear light.
+        rgb=float3(dot(rgb,float3(.939542f,.050181f,.010277f)),
+                   dot(rgb,float3(.017772f,.965793f,.016435f)),
+                   dot(rgb,float3(-.001622f,-.004371f,1.005993f)));
+    }
+    return float4(rgb*alpha,alpha);
+}
+float luma(float4 p) { return dot(p.rgb,float3(.2126f,.7152f,.0722f)); }
+float4 fieldPixel(device const uchar* bytes,constant Uniforms& u,int x,int y) {
+    int field=u.options.z;
+    if (field<0 || (y&1)==field) return pixel(bytes,u,x,y);
+    // Low-latency edge-directed spatial interpolation. Never mix moments from
+    // opposite fields; there is no future-frame history or added lookahead.
+    int upper=y-1, lower=y+1;
+    if (upper<0) return pixel(bytes,u,x,lower);
+    if (lower>=int(u.dimensions.y)) return pixel(bytes,u,x,upper);
+    float4 a=pixel(bytes,u,x,upper), b=pixel(bytes,u,x,lower);
+    float4 al=pixel(bytes,u,x-1,upper), br=pixel(bytes,u,x+1,lower);
+    float4 ar=pixel(bytes,u,x+1,upper), bl=pixel(bytes,u,x-1,lower);
+    float vertical=abs(luma(a)-luma(b));
+    float left=abs(luma(al)-luma(br)), right=abs(luma(ar)-luma(bl));
+    if (left<vertical && left<right) return (al+br)*.5f;
+    if (right<vertical) return (ar+bl)*.5f;
+    return (a+b)*.5f;
+}
+fragment float4 omt_fragment(VertexOut in [[stage_in]],
+                             device const uchar* bytes [[buffer(0)]],
+                             constant Uniforms& u [[buffer(1)]]) {
+    float outputAspect=u.output.x/u.output.y;
+    float2 scale=outputAspect>u.output.z ? float2(u.output.z/outputAspect,1)
+                                       : float2(1,outputAspect/u.output.z);
+    float2 uv=(in.uv-.5f)/scale+.5f;
+    if (any(uv<0.f)||any(uv>1.f)) return float4(0,0,0,1);
+    float2 source=uv*float2(u.dimensions.xy)-.5f;
+    int2 p=int2(floor(source)); float2 f=fract(source);
+    float4 top=mix(fieldPixel(bytes,u,p.x,p.y),fieldPixel(bytes,u,p.x+1,p.y),f.x);
+    float4 bottom=mix(fieldPixel(bytes,u,p.x,p.y+1),fieldPixel(bytes,u,p.x+1,p.y+1),f.x);
+    float4 image=mix(top,bottom,f.y);
+    float background=0;
+    if (u.options.w==1) {
+        uint2 tile=uint2(in.position.xy)/20;
+        background=((tile.x+tile.y)&1)==0 ? .13f : .30f;
+    } else if (u.options.w==2) background=1;
+    float3 composite=image.rgb+background*(1-image.a);
+    return float4(encodeSRGB(composite),1);
+}

@@ -1,0 +1,60 @@
+name: Validate
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: xcode-27
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+      - name: Toolchain versions
+        run: |
+          xcodebuild -version
+          python3 --version
+      - name: App and release regressions
+        run: make test
+      - name: Shell syntax
+        run: |
+          for script in scripts/*.sh; do
+            bash -n "$script"
+          done
+      - name: Release archive
+        run: >-
+          xcodebuild -project OMTReceiver.xcodeproj -scheme OMTReceiver
+          -configuration Release -derivedDataPath build/DerivedData
+          -destination 'generic/platform=macOS' -archivePath build/Validation.xcarchive
+          CODE_SIGNING_ALLOWED=NO archive
+      - name: Verify Apple Silicon binaries and built metadata
+        run: |
+          python3 - <<'PY'
+          import plistlib
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          from release import verify_app_archive, verify_arm64_app
+          archive = Path("build/Validation.xcarchive")
+          verify_app_archive(archive)
+          version = Path("VERSION").read_text().strip()
+          for configuration in ("Debug", "Release"):
+              app = (Path("build/DerivedData/Build/Products/Debug/OMTReceiver.app") if configuration == "Debug"
+                     else archive / "Products/Applications/OMTReceiver.app")
+              verify_arm64_app(app)
+              info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+              assert info["CFBundleShortVersionString"] == version
+              assert info["LSMinimumSystemVersion"] == "14.0"
+              assert info["SUFeedURL"] == "https://github.com/sukujgrg/OMTReceiver-macOS/releases/latest/download/appcast.xml"
+              assert info["SURequireSignedFeed"] is True
+              assert info["SUVerifyUpdateBeforeExtraction"] is True
+              assert info["SUAllowsAutomaticUpdates"] is False
+              assert not info.get("SUEnableInstallerLauncherService")
+              assert not info.get("SUEnableDownloaderService")
+              print(f"{configuration}: OMTReceiver {version} with signed Sparkle updates")
+          PY

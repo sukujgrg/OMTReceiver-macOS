@@ -1,0 +1,7 @@
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+Config/Signing.local.xcconfig
+.DS_Store
+__pycache__/
